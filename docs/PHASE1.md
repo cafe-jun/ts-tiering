@@ -32,7 +32,7 @@ Phase 1은 **합성 데이터만** 사용하고 회사 인프라를 전혀 건�
 
 ## 주차별 계획 (6~8주, 주말 기준)
 
-### W1 — 스캐폴딩 + 도메인 모델 + 데이터 생성기
+### W1 — 스캐폴딩 + 도메인 모델 + 데이터 생성기 ✅
 
 - Gradle 8.x wrapper, 멀티모듈 구성 (`core`, `storage-s3`, `bench`)
 - `core`: `Datapoint`, `TimeRange`, `PartitionSpec` 인터페이스
@@ -44,7 +44,7 @@ Phase 1은 **합성 데이터만** 사용하고 회사 인프라를 전혀 건�
 
 **Exit:** 1천만 건이 JSON/CSV로 생성되고, 크기와 생성 시간이 기록됨
 
-### W2 — Parquet 쓰기 (이 프로젝트의 첫 관문)
+### W2 — Parquet 쓰기 (이 프로젝트의 첫 관문) ✅
 
 - `parquet-java` vs `Apache Arrow Java` 실제로 둘 다 붙여본다
 - Hadoop 의존성이 얼마나 딸려오는지, 없이 쓸 수 있는지 확인
@@ -54,7 +54,9 @@ Phase 1은 **합성 데이터만** 사용하고 회사 인프라를 전혀 건�
   - Parquet에서도 4컬럼(sparse)으로 갈지, 단일 컬럼 + 타입 태그로 갈지
   - 압축률과 쿼리 편의가 갈리는 지점 → 둘 다 만들어서 비교
 
-**Exit:** ADR-0001(라이브러리), ADR-0002(값 타입) 작성. 1천만 건 Parquet 생성 성공
+**Exit:** ✅ 완료 (2026-08-08) — ADR-0001, ADR-0002 작성. 1천만 건 Parquet 생성 성공.
+Hadoop 은 런타임에서 완전히 제거했고, 대신 `PlainCodecFactory` 구현과 푸터 직접 파싱이 필요했다.
+**Java 레코드 읽기는 막혀 있다** — 쿼리는 DuckDB, reconciler 는 푸터 건수로 간다 (ADR-0001 참고)
 
 ### W3 — S3 적재 (LocalStack)
 
