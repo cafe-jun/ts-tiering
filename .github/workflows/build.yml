@@ -1,0 +1,34 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build and test
+        run: ./gradlew build --no-daemon
+
+      # 합성 데이터 생성기가 실제로 도는지까지 확인한다.
+      # 값 분포가 깨지면 SensorsTest 가 먼저 잡지만, 파이프라인 자체가 도는지는 별개다.
+      - name: Smoke test generator
+        run: ./gradlew :bench:generate --args="--count=100_000 --out=data/ci-smoke.ndjson" --no-daemon
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: '**/build/reports/tests/'

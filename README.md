@@ -1,9 +1,12 @@
 # ts-tiering
 
+[![build](https://github.com/cafe-jun/ts-tiering/actions/workflows/build.yml/badge.svg)](https://github.com/cafe-jun/ts-tiering/actions/workflows/build.yml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 IoT 시계열 데이터를 hot(Cassandra) / cold(S3 Parquet) 계층으로 나누고,
 **조회하는 쪽은 그 경계를 모르게** 만드는 티어링 계층.
 
-> 상태: Phase 1 진행 중 — [계획](docs/PHASE1.md)
+> 상태: **Phase 1 / W1 완료** — [계획](docs/PHASE1.md) · [W1 기준선](docs/benchmark/w1-baseline.md)
 
 ## 문제
 
@@ -42,4 +45,20 @@ Kafka (telemetry)
 
 ## 벤치마크
 
-[docs/benchmark/](docs/benchmark/) 참고. (Phase 1 W7에 채워짐)
+[docs/benchmark/](docs/benchmark/) 참고.
+
+현재까지: [W1 기준선](docs/benchmark/w1-baseline.md) — 합성 데이터 1천만 건 = NDJSON 1,875 MiB.
+이 값이 W3 Parquet 압축률의 분모다.
+
+## 개발
+
+```bash
+./gradlew build                                                    # 빌드 + 테스트
+./gradlew :bench:generate --args="--count=10_000_000 --out=data/raw-10m.ndjson"
+```
+
+Java 17 / Gradle 8.10.2 (wrapper 사용).
+
+## 라이선스
+
+[Apache License 2.0](LICENSE)
