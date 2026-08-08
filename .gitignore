@@ -1,0 +1,18 @@
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+.idea/
+*.iml
+.DS_Store
+
+# 생성 데이터 / 측정 산출물 (원본 데이터는 커밋하지 않음)
+/data/
+/out/
+*.parquet
+*.duckdb
+
+# 측정 "결과 요약"은 커밋한다 (docs/benchmark/*.md)
+!docs/benchmark/*.md
+
+.env
+.env.local
