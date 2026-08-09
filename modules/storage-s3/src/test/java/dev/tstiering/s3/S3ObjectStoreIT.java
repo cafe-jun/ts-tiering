@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * LocalStack 이 떠 있어야 도는 통합 테스트. CI 는 Docker 를 띄우지 않으므로 기본은 꺼져 있다.
+ * 로컬 S3(MinIO)가 떠 있어야 도는 통합 테스트. CI 는 Docker 를 띄우지 않으므로 기본은 꺼져 있다.
  *
  * <pre>
  * docker compose -f deploy/docker-compose.dev.yml up -d
@@ -31,7 +31,7 @@ class S3ObjectStoreIT {
     void singlePutRoundTrips(@TempDir Path dir) throws IOException {
         Path file = randomFile(dir.resolve("small.bin"), 1024);
 
-        try (S3ObjectStore store = S3ObjectStore.open(S3Settings.localstack(BUCKET))) {
+        try (S3ObjectStore store = S3ObjectStore.open(S3Settings.local(BUCKET))) {
             store.createBucketIfAbsent();
             UploadResult r = store.put("single/small.bin", file);
 
@@ -47,7 +47,7 @@ class S3ObjectStoreIT {
         int partSize = S3Settings.MIN_PART_SIZE;
         Path file = randomFile(dir.resolve("big.bin"), 12 * 1024 * 1024);
 
-        var settings = S3Settings.localstack(BUCKET)
+        var settings = S3Settings.local(BUCKET)
                 .withPartSize(partSize)
                 .withMultipartThreshold(partSize);
 
@@ -73,7 +73,7 @@ class S3ObjectStoreIT {
         randomFile(dir.resolve("date=2026-01-01/hour=00/part-0.parquet"), 128);
         randomFile(dir.resolve("date=2026-01-01/hour=00/part-1.parquet"), 128);
 
-        try (S3ObjectStore store = S3ObjectStore.open(S3Settings.localstack(BUCKET))) {
+        try (S3ObjectStore store = S3ObjectStore.open(S3Settings.local(BUCKET))) {
             store.createBucketIfAbsent();
             store.putTree(dir, "tree");
 

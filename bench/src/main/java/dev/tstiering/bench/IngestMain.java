@@ -25,7 +25,7 @@ import java.util.stream.Stream;
  * # 1년 A안, 로컬만 (S3 없이 파일 수·크기·처리량만)
  * ./gradlew :bench:ingest --args="--days=365 --devices-per-tenant=17 --interval-seconds=60"
  *
- * # LocalStack 에 올리기까지
+ * # 로컬 S3(MinIO)에 올리기까지
  * docker compose -f deploy/docker-compose.dev.yml up -d
  * ./gradlew :bench:ingest --args="--days=365 --devices-per-tenant=17 --interval-seconds=60 --s3=true"
  *
@@ -78,7 +78,7 @@ public final class IngestMain {
         List<UploadResult> uploads = List.of();
         double uploadSeconds = 0;
         if (toS3) {
-            var settings = S3Settings.localstack(opts.string("bucket", "ts-tiering-cold"))
+            var settings = S3Settings.local(opts.string("bucket", "ts-tiering-cold"))
                     .withPartSize((int) opts.number("part-size-mib", 8) * 1024 * 1024);
             long uploadStart = System.nanoTime();
             try (S3ObjectStore store = S3ObjectStore.open(settings)) {
@@ -136,7 +136,7 @@ public final class IngestMain {
                     .forEach(r -> System.out.printf("  %-10.2f %8d %6d  %s%n",
                             r.mib(), r.elapsed().toMillis(), r.parts(), r.key()));
 
-            System.out.println("\n⚠️ LocalStack 은 실 S3 가 아니다. 위 시간은 루프백 + LocalStack 오버헤드이고");
+            System.out.println("\n⚠️ MinIO 는 실 S3 가 아니다. 위 시간은 루프백 + MinIO 오버헤드이고");
             System.out.println("   네트워크 지연을 포함하지 않는다. 절대 처리량은 W8(실 AWS)에서 다시 잰다.");
         }
     }

@@ -34,7 +34,7 @@ import java.util.stream.Stream;
  * 그러면 플랫폼별 네이티브 라이브러리가 배포물에 딸려오기 때문이다
  * (ADR-0001 에서 Arrow 를 기각한 것과 같은 이유).
  *
- * <p>파트 업로드는 <b>순차</b>다. 병렬화는 W3 측정에서 순차 수치가 LocalStack 자체에 묶여
+ * <p>파트 업로드는 <b>순차</b>다. 병렬화는 W3 측정에서 순차 수치가 로컬 S3 자체에 묶여
  * 있는지 확인한 뒤에 붙인다 — 지금 넣으면 무엇을 재고 있는지가 흐려진다.
  */
 public final class S3ObjectStore implements Closeable {
@@ -71,7 +71,7 @@ public final class S3ObjectStore implements Closeable {
 
     // --- 버킷 ------------------------------------------------------------------
 
-    /** 이미 있으면 아무것도 하지 않는다. LocalStack 을 매번 새로 띄우는 흐름을 위한 것. */
+    /** 이미 있으면 아무것도 하지 않는다. 로컬 S3 를 매번 새로 띄우는 흐름을 위한 것. */
     public void createBucketIfAbsent() {
         try {
             client.headBucket(b -> b.bucket(settings.bucket()));

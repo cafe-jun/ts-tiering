@@ -3,28 +3,33 @@
 #   docker compose -f deploy/docker-compose.dev.yml up -d
 #   docker compose -f deploy/docker-compose.dev.yml down -v
 #
-# ⚠️ 측정 해석 주의: LocalStack 은 실 S3 가 아니다.
-# 여기서 나오는 업로드 시간은 루프백 + LocalStack 오버헤드이지 네트워크 지연이 아니다.
-# W3 에서 이 숫자로 답할 수 있는 것은 "파일 크기 / 파트 크기에 따른 상대적 경향"까지이고,
+# 계획서에는 LocalStack 이라고 적혀 있지만 MinIO 를 쓴다.
+# LocalStack 커뮤니티 이미지(:s3-latest 포함)는 2026-03 릴리스로 단종됐고
+# 지금은 localstack/localstack-pro + 라이선스 토큰이 있어야 기동한다 (없으면 exit 55).
+# MinIO 는 S3 API 호환이고 multipart 도 그대로 지원하므로 재는 대상이 바뀌지 않는다.
+#
+# ⚠️ 측정 해석 주의: MinIO 도 실 S3 가 아니다.
+# 여기서 나오는 업로드 시간은 루프백 + MinIO 오버헤드이지 네트워크 지연이 아니다.
+# 이 숫자로 답할 수 있는 것은 "파일 크기 / 파트 크기에 따른 상대적 경향"까지이고,
 # 절대 처리량은 W8(실 AWS)에서 다시 잰다.
 
 services:
-  localstack:
-    image: localstack/localstack:2026.07.2
-    container_name: ts-tiering-localstack
+  s3:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: ts-tiering-s3
+    command: server /data --console-address ":9001"
     ports:
-      - "4566:4566"
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # 웹 콘솔
     environment:
-      SERVICES: s3
-      AWS_DEFAULT_REGION: ap-northeast-2
-      # 컨테이너를 내리면 버킷도 사라진다. 벤치마크는 매번 깨끗한 상태에서 시작하는 편이 낫다.
-      PERSISTENCE: 0
-      DEBUG: 0
-    volumes:
-      # ready.d 훅은 서비스가 뜬 뒤 실행된다. awslocal 은 이미지 안에 들어 있다.
-      - ./localstack-init:/etc/localstack/init/ready.d:ro
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      # CreateBucket 이 보내는 LocationConstraint 와 어긋나면 InvalidLocationConstraint 로 거부된다.
+      MINIO_REGION: ap-northeast-2
+    # 볼륨을 붙이지 않는다 — 컨테이너를 내리면 데이터도 사라진다.
+    # 벤치마크는 매번 깨끗한 상태에서 시작하는 편이 낫다.
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
+      test: ["CMD", "mc", "ready", "local"]
       interval: 5s
       timeout: 3s
       retries: 20

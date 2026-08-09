@@ -6,7 +6,7 @@
 IoT 시계열 데이터를 hot(Cassandra) / cold(S3 Parquet) 계층으로 나누고,
 **조회하는 쪽은 그 경계를 모르게** 만드는 티어링 계층.
 
-> 상태: **Phase 1 / W2 완료** — [계획](docs/PHASE1.md) · [벤치마크](docs/benchmark/) · [ADR](docs/adr/)
+> 상태: **Phase 1 / W3 적재 완료** — [계획](docs/PHASE1.md) · [벤치마크](docs/benchmark/) · [ADR](docs/adr/)
 
 ## 문제
 
@@ -49,11 +49,13 @@ Kafka (telemetry)
 
 [docs/benchmark/](docs/benchmark/) 참고.
 
-- [W1 기준선](docs/benchmark/w1-baseline.md) — 합성 1천만 건 = NDJSON 1,875 MiB
-- [W2 레이아웃 × 코덱](docs/benchmark/w2-parquet-layout.md) — 같은 데이터가 PER_KEY_TYPED + ZSTD 로 **5.5 MiB**
+- [W1 기준선](docs/benchmark/w1-baseline.md) — 합성 데이터 생성기와 값 분포 검증
+- [W2 레이아웃 × 코덱](docs/benchmark/w2-parquet-layout.md) — PER_KEY_TYPED + ZSTD 채택 근거
+- [W3 granularity 프로브](docs/benchmark/w3-partition-granularity.md) — 시 단위 파티션이 일 단위보다 **2.83배 크다**
+- [W3 S3 적재](docs/benchmark/w3-s3-ingest.md) — 1년치 **134,028,000 건 → 132.0 MiB / 5,475 객체**
 
-> 배수를 그대로 인용하지 말 것. 현재 데이터셋은 9시간만 커버해서 부풀려져 있다.
-> 정직한 비교는 1년 데이터셋 × Cassandra 실제 디스크 대비로 W3 에서 잰다.
+> 압축비 190.6배는 **NDJSON 대비**다. NDJSON 은 아무도 실제로 쓰지 않는 뚱뚱한 분모이므로
+> 그대로 인용하면 안 된다. 정직한 분모(Cassandra 실제 디스크) 산출은 아직 남아 있다.
 
 ## 개발
 

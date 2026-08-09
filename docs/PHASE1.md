@@ -58,13 +58,25 @@ Phase 1은 **합성 데이터만** 사용하고 회사 인프라를 전혀 건�
 Hadoop 은 런타임에서 완전히 제거했고, 대신 `PlainCodecFactory` 구현과 푸터 직접 파싱이 필요했다.
 **Java 레코드 읽기는 막혀 있다** — 쿼리는 DuckDB, reconciler 는 푸터 건수로 간다 (ADR-0001 참고)
 
-### W3 — S3 적재 (LocalStack)
+### W3 — S3 적재 ✅
 
-- `deploy/docker-compose.dev.yml`에 LocalStack
+- `deploy/docker-compose.dev.yml`에 로컬 S3
 - multipart upload, 파일 크기별 업로드 시간 측정
 - 1억 건으로 스케일업 (파일 수, 총 크기, 소요 시간 기록)
 
-**Exit:** 1억 건이 S3(LocalStack)에 적재됨. 압축률 실측치 확보
+**Exit:** ✅ 적재 완료 (2026-08-09) — 134,028,000 건 / 365일 → **132.0 MiB, 5,475 객체**.
+NDJSON 대비 190.6배, 적재 1,337,299 pt/s. [측정](benchmark/w3-s3-ingest.md)
+
+계획과 달라진 것:
+
+- **LocalStack → MinIO.** 커뮤니티 이미지가 2026-03 릴리스로 단종됐다 (Pro 라이선스 필수).
+  S3 API 호환 대체재라 재는 대상은 같다
+- **파티션은 `date` 단위.** 계획서의 `date/hour` 는 파일당 1,020행밖에 안 돼
+  파일의 69%가 Parquet 고정 오버헤드가 된다 ([프로브](benchmark/w3-partition-granularity.md))
+- **"파일 크기별 업로드 시간"은 답이 나오지 않았다.** 모든 파일이 24.7 KiB 근처라
+  multipart 가 한 번도 안 탄다. 이 항목은 디바이스를 늘리기 전에는 측정 불가
+
+**잔여:** Cassandra 디스크 사용량 산출 (정직한 분모). 이게 W3 의 마지막 조각이다.
 
 ### W4 — DuckDB 조회
 
@@ -86,6 +98,12 @@ Hadoop 은 런타임에서 완전히 제거했고, 대신 `PlainCodecFactory` �
 | A | `date=/hour=` | 디바이스 하나 보려고 전체 스캔 |
 | B | `tenant=/profile=/date=/hour=` | 균형점 후보 |
 | C | `tenant=/deviceId=/date=` | 디렉터리 폭발 (small file) |
+
+> **W3 에서 드러난 수정 사항:** 위 표는 "경로에 무엇을 넣을지"만 변수로 두는데,
+> 정작 크기를 2.83배 흔든 것은 **시간 축 granularity**(`date` vs `date/hour`)였다.
+> ADR-0003 은 스킴과 granularity 를 별개 축으로 다뤄야 한다.
+> 또 스킴 C 는 같은 시각에 디바이스×키(255)만큼 라이터가 열리므로
+> `--max-open-writers` 를 그 이상으로 두지 않으면 축출이 파일을 쪼개 비교가 불공정해진다.
 
 - 각 스킴별로 Parquet 내부 정렬 순서도 변수로 둔다 (`deviceId,ts` vs `ts`)
 - row group statistics로 프루닝이 실제로 걸리는지 확인

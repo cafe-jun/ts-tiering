@@ -16,7 +16,7 @@ class S3SettingsTest {
     @Test
     void rejectsPartSizeBelowS3Minimum() {
         var e = assertThrows(IllegalArgumentException.class,
-                () -> S3Settings.localstack("b").withPartSize(1024));
+                () -> S3Settings.local("b").withPartSize(1024));
         assertTrue(e.getMessage().contains("partSize"));
     }
 
@@ -24,20 +24,20 @@ class S3SettingsTest {
     @Test
     void rejectsThresholdBelowPartSize() {
         assertThrows(IllegalArgumentException.class,
-                () -> S3Settings.localstack("b").withMultipartThreshold(1024));
+                () -> S3Settings.local("b").withMultipartThreshold(1024));
     }
 
     /** withPartSize 는 임계값이 뒤집히지 않게 함께 밀어올린다. */
     @Test
     void raisingPartSizeAlsoRaisesThreshold() {
-        var s = S3Settings.localstack("b").withPartSize(64 * 1024 * 1024);
+        var s = S3Settings.local("b").withPartSize(64 * 1024 * 1024);
         assertEquals(64 * 1024 * 1024, s.partSize());
         assertTrue(s.multipartThreshold() >= s.partSize());
     }
 
     @Test
-    void localstackUsesPathStyleButRealAwsDoesNot() {
-        assertTrue(S3Settings.localstack("b").pathStyleAccess());
+    void localEndpointUsesPathStyleButRealAwsDoesNot() {
+        assertTrue(S3Settings.local("b").pathStyleAccess());
 
         var real = new S3Settings(null, "ap-northeast-2", "b", null, null,
                 S3Settings.DEFAULT_PART_SIZE, S3Settings.DEFAULT_PART_SIZE);

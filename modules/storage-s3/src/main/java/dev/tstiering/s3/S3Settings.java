@@ -3,9 +3,9 @@ package dev.tstiering.s3;
 import java.net.URI;
 
 /**
- * S3 접속 설정. LocalStack 과 실 AWS 를 같은 코드로 가리키기 위한 최소한의 스위치만 둔다.
+ * S3 접속 설정. 로컬 S3 와 실 AWS 를 같은 코드로 가리키기 위한 최소한의 스위치만 둔다.
  *
- * @param endpoint          {@code null} 이면 실제 AWS. LocalStack 은 {@code http://localhost:4566}
+ * @param endpoint          {@code null} 이면 실제 AWS. 로컬 MinIO 는 {@code http://localhost:9000}
  * @param region            버킷 리전
  * @param bucket            버킷 이름
  * @param accessKey         {@code null} 이면 SDK 기본 자격증명 체인을 쓴다
@@ -43,19 +43,24 @@ public record S3Settings(
         }
     }
 
-    /** {@code deploy/docker-compose.dev.yml} 이 띄우는 LocalStack 을 가리킨다. */
-    public static S3Settings localstack(String bucket) {
+    /**
+     * {@code deploy/docker-compose.dev.yml} 이 띄우는 로컬 S3(MinIO)를 가리킨다.
+     *
+     * <p>계획서는 LocalStack 을 전제했지만 커뮤니티 이미지가 2026-03 에 단종돼 MinIO 로 갔다.
+     * 접속 파라미터만 다르고 S3 API 는 같다.
+     */
+    public static S3Settings local(String bucket) {
         return new S3Settings(
-                URI.create("http://localhost:4566"),
+                URI.create("http://localhost:9000"),
                 "ap-northeast-2",
                 bucket,
-                "test",
-                "test",
+                "minioadmin",
+                "minioadmin",
                 DEFAULT_PART_SIZE,
                 DEFAULT_PART_SIZE);
     }
 
-    /** LocalStack 은 가상호스트 스타일(bucket.localhost)을 쓰기 번거로워 path-style 로 붙는다. */
+    /** 로컬 S3 는 가상호스트 스타일(bucket.localhost)을 쓰기 번거로워 path-style 로 붙는다. */
     public boolean pathStyleAccess() {
         return endpoint != null;
     }
