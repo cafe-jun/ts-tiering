@@ -74,7 +74,12 @@ public final class ParquetDatapointWriter implements Closeable {
         writer.write(dp);
     }
 
-    /** 지금까지 기록된 압축 후 바이트. close 전에는 버퍼에 남은 분이 반영되지 않는다. */
+    /**
+     * 지금까지 기록된 압축 후 바이트. 아직 flush 되지 않은 row group 버퍼까지 포함하므로
+     * 첫 row group 이 차기 전에도 값이 늘어난다 — {@link PartitionedParquetWriter} 의 크기 롤링이
+     * 이 성질에 기대고 있고, {@code PartitionedParquetWriterTest} 가 회귀로 고정한다.
+     * 푸터는 아직 안 쓰였으므로 close 후 실제 파일 크기보다는 조금 작다.
+     */
     public long dataSize() {
         return writer.getDataSize();
     }

@@ -59,6 +59,26 @@ public final class BenchArgs {
         return v == null ? DEFAULT_START.toEpochMilli() : Instant.parse(v).toEpochMilli();
     }
 
+    /**
+     * {@code --days=365} 를 주면 {@code --count} 대신 <b>커버 기간</b>으로 건수를 정한다.
+     *
+     * <p>W4 쿼리 Q2(1년 일평균)/Q3(1개월 평균)를 재려면 커버 기간이 정확해야 하는데,
+     * 건수로 지정하면 디바이스 수나 주기를 건드릴 때마다 커버 기간이 조용히 어긋난다.
+     */
+    public long days() {
+        return number("days", 0);
+    }
+
+    /** {@code --days} 가 있으면 그쪽이 이긴다. 없으면 {@code --count}. */
+    public long countFor(SyntheticDataGenerator generator) {
+        long days = days();
+        if (days <= 0) {
+            return number("count", 1_000_000);
+        }
+        long ticks = days * 86_400_000L / intervalMillis();
+        return ticks * generator.pointsPerTick();
+    }
+
     public SyntheticDataGenerator generator() {
         var config = new SyntheticDataGenerator.Config(
                 tenants(), devicesPerTenant(), "industrial-sensor", intervalMillis(), startTs());
