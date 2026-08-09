@@ -72,7 +72,7 @@ NDJSON 대비 190.6배, 적재 1,337,299 pt/s. [측정](benchmark/w3-s3-ingest.m
 - **LocalStack → MinIO.** 커뮤니티 이미지가 2026-03 릴리스로 단종됐다 (Pro 라이선스 필수).
   S3 API 호환 대체재라 재는 대상은 같다
 - **파티션은 `date` 단위.** 계획서의 `date/hour` 는 파일당 1,020행밖에 안 돼
-  파일의 69%가 Parquet 고정 오버헤드가 된다 ([프로브](benchmark/w3-partition-granularity.md))
+  전체의 67.5%가 Parquet 고정 오버헤드가 된다 ([프로브](benchmark/w3-partition-granularity.md))
 - **"파일 크기별 업로드 시간"은 답이 나오지 않았다.** 모든 파일이 24.7 KiB 근처라
   multipart 가 한 번도 안 탄다. 이 항목은 디바이스를 늘리기 전에는 측정 불가
 
