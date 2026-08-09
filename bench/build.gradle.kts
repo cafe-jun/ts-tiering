@@ -7,6 +7,10 @@ dependencies {
     implementation(project(":storage-parquet"))
     implementation(project(":storage-s3"))
     implementation("com.fasterxml.jackson.core:jackson-core:2.18.2")
+
+    // Cassandra 는 "정직한 분모"를 재기 위한 측정 대상일 뿐이다 (W3).
+    // Phase 2 의 storage-cassandra(읽기 전용)와는 별개이므로 벤치 모듈에만 둔다.
+    implementation("org.apache.cassandra:java-driver-core:4.19.3")
     runtimeOnly("org.slf4j:slf4j-simple:2.0.16")
 }
 
@@ -32,6 +36,17 @@ tasks.register<JavaExec>("ingest") {
     classpath = sourceSets["main"].runtimeClasspath
     workingDir = rootProject.projectDir
     maxHeapSize = "4g"
+}
+
+// docker compose -f deploy/docker-compose.dev.yml up -d cassandra
+// ./gradlew :bench:cassandraBaseline --args="--days=30 --devices-per-tenant=17 --interval-seconds=60"
+tasks.register<JavaExec>("cassandraBaseline") {
+    group = "benchmark"
+    description = "ThingsBoard ts_kv 스키마로 Cassandra 에 적재한다. 압축률의 정직한 분모를 재기 위한 것"
+    mainClass.set("dev.tstiering.bench.CassandraBaselineMain")
+    classpath = sourceSets["main"].runtimeClasspath
+    workingDir = rootProject.projectDir
+    maxHeapSize = "2g"
 }
 
 tasks.register<JavaExec>("parquetBench") {

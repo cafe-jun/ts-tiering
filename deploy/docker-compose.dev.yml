@@ -34,3 +34,23 @@ services:
       timeout: 3s
       retries: 20
       start_period: 10s
+
+  # 압축률의 "정직한 분모"를 재기 위한 것. Phase 1 은 회사 Cassandra 에 접속하지 않는다 —
+  # ThingsBoard 의 ts_kv 스키마를 로컬에 그대로 세워 SSTable 크기를 실측한다.
+  # 필요할 때만 띄운다:  docker compose -f deploy/docker-compose.dev.yml up -d cassandra
+  cassandra:
+    image: cassandra:4.1.11
+    container_name: ts-tiering-cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: ts-tiering
+      # 기본값(1/4 RAM)이면 이 머신에서 과하게 잡는다. 측정에 필요한 만큼만.
+      MAX_HEAP_SIZE: 2G
+      HEAP_NEWSIZE: 400M
+    healthcheck:
+      test: ["CMD-SHELL", "nodetool status | grep -q '^UN'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s

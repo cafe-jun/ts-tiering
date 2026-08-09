@@ -53,9 +53,21 @@ Kafka (telemetry)
 - [W2 레이아웃 × 코덱](docs/benchmark/w2-parquet-layout.md) — PER_KEY_TYPED + ZSTD 채택 근거
 - [W3 granularity 프로브](docs/benchmark/w3-partition-granularity.md) — 시 단위 파티션이 일 단위보다 **2.83배 크다**
 - [W3 S3 적재](docs/benchmark/w3-s3-ingest.md) — 1년치 **134,028,000 건 → 132.0 MiB / 5,475 객체**
+- [W3 Cassandra 기준선](docs/benchmark/w3-cassandra-baseline.md) — 같은 데이터가 `ts_kv` 로 **11.79 bytes/행**
 
-> 압축비 190.6배는 **NDJSON 대비**다. NDJSON 은 아무도 실제로 쓰지 않는 뚱뚱한 분모이므로
-> 그대로 인용하면 안 된다. 정직한 분모(Cassandra 실제 디스크) 산출은 아직 남아 있다.
+### 핵심 수치
+
+같은 1년치 데이터(134,028,000 건, 디바이스 51대, 60초 주기)를 저장했을 때:
+
+| | 크기 | 행당 |
+|---|---|---|
+| Cassandra `ts_kv` (RF=1) | 약 1.47 GiB | 11.79 B |
+| **Parquet + ZSTD (S3)** | **132.0 MiB** | **1.02 B** |
+
+**11.5배.** RF=3 이면 약 34배이고, TTL 을 걸면 Cassandra 쪽이 더 커지므로 이 값은 하한이다.
+
+> NDJSON 대비 190배라는 숫자도 나오지만 인용하지 말 것 — Cassandra 자체가 이미 NDJSON 을
+> 16.7배 압축하고 있어서, 그 배수의 대부분은 "JSON 이 뚱뚱했다"는 뜻일 뿐이다.
 
 ## 개발
 
