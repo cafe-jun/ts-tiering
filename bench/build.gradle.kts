@@ -11,6 +11,10 @@ dependencies {
     // Cassandra 는 "정직한 분모"를 재기 위한 측정 대상일 뿐이다 (W3).
     // Phase 2 의 storage-cassandra(읽기 전용)와는 별개이므로 벤치 모듈에만 둔다.
     implementation("org.apache.cassandra:java-driver-core:4.19.3")
+
+    // W4 쿼리 엔진. 네이티브 라이브러리를 품고 있지만 벤치 모듈에만 있으므로
+    // ADR-0001 이 Arrow 를 기각한 이유(배포 아티팩트가 플랫폼별로 갈림)와는 상관이 없다.
+    implementation("org.duckdb:duckdb_jdbc:1.3.1.0")
     runtimeOnly("org.slf4j:slf4j-simple:2.0.16")
 }
 
@@ -33,6 +37,17 @@ tasks.register<JavaExec>("ingest") {
     group = "benchmark"
     description = "파티션된 Parquet 트리로 적재하고 (선택적으로) S3 에 올린다. W3 측정 지표표를 찍는다"
     mainClass.set("dev.tstiering.bench.IngestMain")
+    classpath = sourceSets["main"].runtimeClasspath
+    workingDir = rootProject.projectDir
+    maxHeapSize = "4g"
+}
+
+// docker compose -f deploy/docker-compose.dev.yml up -d
+// ./gradlew :bench:query --args="--iterations=20"
+tasks.register<JavaExec>("query") {
+    group = "benchmark"
+    description = "DuckDB 로 S3 Parquet 을 직접 조회한다. 쿼리 3종의 p50/p95 baseline (W4)"
+    mainClass.set("dev.tstiering.bench.QueryBenchMain")
     classpath = sourceSets["main"].runtimeClasspath
     workingDir = rootProject.projectDir
     maxHeapSize = "4g"

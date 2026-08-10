@@ -96,4 +96,4 @@ RF=3 이면 약 34배이고, TTL 을 걸면 Cassandra 쪽이 더 커지므로 11
 
 - W4: DuckDB 로 이 5,475개 객체를 직접 조회, 쿼리 3종 baseline
 - W5~W6: 스킴 3종 × granularity 축. 프로브 결과상 **granularity 가 더 큰 변수**이므로
-  ADR-0003 은 두 축을 분리해서 다뤄야 한다
+  ADR-0004 는 두 축을 분리해서 다뤄야 한다

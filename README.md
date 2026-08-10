@@ -44,6 +44,7 @@ Kafka (telemetry)
 
 - [ADR-0001 — Parquet 라이브러리와 Hadoop 의존성](docs/adr/0001-parquet-library.md)
 - [ADR-0002 — 텔레메트리 값의 Parquet 표현](docs/adr/0002-value-layout.md)
+- [ADR-0003 — 쿼리 엔진](docs/adr/0003-query-engine.md)
 
 ## 벤치마크
 
@@ -54,6 +55,7 @@ Kafka (telemetry)
 - [W3 granularity 프로브](docs/benchmark/w3-partition-granularity.md) — 시 단위 파티션이 일 단위보다 **2.83배 크다**
 - [W3 S3 적재](docs/benchmark/w3-s3-ingest.md) — 1년치 **134,028,000 건 → 132.0 MiB / 5,475 객체**
 - [W3 Cassandra 기준선](docs/benchmark/w3-cassandra-baseline.md) — 같은 데이터가 `ts_kv` 로 **11.79 bytes/행**
+- [W4 DuckDB 조회](docs/benchmark/w4-duckdb-baseline.md) — 프루닝은 99.4% 걸리는데 **지연은 객체 나열이 지배한다**
 
 ### 핵심 수치
 
@@ -75,6 +77,13 @@ Kafka (telemetry)
 ./gradlew build                                                    # 빌드 + 테스트
 ./gradlew :bench:generate --args="--count=10_000_000 --out=data/raw-10m.ndjson"
 ./gradlew :bench:parquetBench --args="--count=10_000_000"      # 레이아웃 × 코덱 비교
+
+# 로컬 S3(MinIO) 필요 — docker compose -f deploy/docker-compose.dev.yml up -d
+./gradlew :bench:ingest --args="--days=365 --devices-per-tenant=17 --interval-seconds=60 --s3=true"
+./gradlew :bench:query  --args="--iterations=20"               # 쿼리 3종 p50/p95 + 프루닝
+
+# Cassandra 기준선 — docker compose -f deploy/docker-compose.dev.yml up -d cassandra
+./gradlew :bench:cassandraBaseline --args="--days=30 --devices-per-tenant=17 --interval-seconds=60"
 ```
 
 Java 17 / Gradle 8.10.2 (wrapper 사용).
