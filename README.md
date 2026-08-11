@@ -6,7 +6,7 @@
 IoT 시계열 데이터를 hot(Cassandra) / cold(S3 Parquet) 계층으로 나누고,
 **조회하는 쪽은 그 경계를 모르게** 만드는 티어링 계층.
 
-> 상태: **Phase 1 / W3 적재 완료** — [계획](docs/PHASE1.md) · [벤치마크](docs/benchmark/) · [ADR](docs/adr/)
+> 상태: **Phase 1 / W6 완료** (남은 것: W7 공개, W8 Athena) — [계획](docs/PHASE1.md) · [벤치마크](docs/benchmark/) · [ADR](docs/adr/)
 
 ## 문제
 
@@ -45,6 +45,7 @@ Kafka (telemetry)
 - [ADR-0001 — Parquet 라이브러리와 Hadoop 의존성](docs/adr/0001-parquet-library.md)
 - [ADR-0002 — 텔레메트리 값의 Parquet 표현](docs/adr/0002-value-layout.md)
 - [ADR-0003 — 쿼리 엔진](docs/adr/0003-query-engine.md)
+- [ADR-0004 — 파티션 스킴](docs/adr/0004-partition-scheme.md)
 
 ## 벤치마크
 
@@ -56,6 +57,7 @@ Kafka (telemetry)
 - [W3 S3 적재](docs/benchmark/w3-s3-ingest.md) — 1년치 **134,028,000 건 → 132.0 MiB / 5,475 객체**
 - [W3 Cassandra 기준선](docs/benchmark/w3-cassandra-baseline.md) — 같은 데이터가 `ts_kv` 로 **11.79 bytes/행**
 - [W4 DuckDB 조회](docs/benchmark/w4-duckdb-baseline.md) — 프루닝은 99.4% 걸리는데 **지연은 객체 나열이 지배한다**
+- [W5~W6 파티션 스킴](docs/benchmark/w5-partition-schemes.md) — 디바이스 파티션은 **바이트 26배 절감, 지연 43배 악화**
 
 ### 핵심 수치
 

@@ -36,7 +36,31 @@ public final class HivePartitionSpecs {
         return new Spec("date-hour", dp -> hour.forTs(dp.ts()));
     }
 
-    /** 스킴 B — 균형점 후보. W3 적재의 기준안. */
+    /** 스킴 A 의 굵은 변형. granularity 축을 스킴 축과 분리해 보려면 A 에도 일 단위가 필요하다. */
+    public static PartitionSpec dateOnly() {
+        DateCache date = new DateCache();
+        return new Spec("date", dp -> date.forTs(dp.ts()));
+    }
+
+    /**
+     * <b>ADR-0004 가 채택한 기본 스킴.</b> 계획서의 스킴 B 에서 {@code profile=} 을 뺐다.
+     *
+     * <p>파일 안에 같은 이름의 {@code profile} 열이 있어(ADR-0002 의 스키마) 쿼리 엔진이
+     * 파일 열을 쓰고 경로 파티션을 버린다 — 즉 그 디렉터리 계층은 프루닝에 아무 기여도 못 하면서
+     * 경로만 한 단계 길게 만든다. {@code tenant=} 가 살아남은 건 파일 열 이름이
+     * {@code tenant_id} 라 겹치지 않았기 때문이고, 그건 운이었다.
+     *
+     * <p><b>규칙: 파티션 열 이름은 파일 안의 열 이름과 겹치면 안 된다.</b>
+     */
+    public static PartitionSpec tenantDate() {
+        DateCache date = new DateCache();
+        Map<UUID, String> tenant = new HashMap<>();
+        return new Spec("tenant-date", dp ->
+                tenant.computeIfAbsent(dp.tenantId(), id -> "tenant=" + id)
+                        + "/" + date.forTs(dp.ts()));
+    }
+
+    /** 계획서의 스킴 B. {@code profile=} 이 죽은 계층이라는 것을 보이기 위해 남겨둔다 (ADR-0004). */
     public static PartitionSpec tenantProfileDateHour() {
         HourCache hour = new HourCache();
         Map<UUID, String> tenant = new HashMap<>();

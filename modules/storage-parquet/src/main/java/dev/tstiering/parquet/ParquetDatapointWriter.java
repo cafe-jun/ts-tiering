@@ -2,6 +2,7 @@ package dev.tstiering.parquet;
 
 import dev.tstiering.core.Datapoint;
 import dev.tstiering.core.TsValue;
+import org.apache.parquet.column.ParquetProperties;
 import org.apache.parquet.conf.ParquetConfiguration;
 import org.apache.parquet.conf.PlainParquetConfiguration;
 import org.apache.parquet.hadoop.ParquetWriter;
@@ -48,6 +49,20 @@ public final class ParquetDatapointWriter implements Closeable {
                                               TsValue.Kind fixedKind,
                                               CompressionCodecName codec,
                                               int rowGroupSize) throws IOException {
+        return open(path, layout, fixedKind, codec, rowGroupSize, ParquetWriter.DEFAULT_WRITER_VERSION);
+    }
+
+    /**
+     * @param writerVersion {@code PARQUET_1_0} 은 딕셔너리 + 비트팩킹만 쓴다.
+     *                      {@code PARQUET_2_0} 에서 {@code DELTA_BINARY_PACKED} 가 열리는데,
+     *                      오름차순 정수(정렬된 {@code ts})에서 차이가 크다 — W5 참고.
+     */
+    public static ParquetDatapointWriter open(Path path,
+                                              ValueLayout layout,
+                                              TsValue.Kind fixedKind,
+                                              CompressionCodecName codec,
+                                              int rowGroupSize,
+                                              ParquetProperties.WriterVersion writerVersion) throws IOException {
         if (path.getParent() != null) {
             Files.createDirectories(path.getParent());
         }
@@ -64,7 +79,7 @@ public final class ParquetDatapointWriter implements Closeable {
                 .withCodecFactory(new PlainCodecFactory())
                 .withRowGroupSize((long) rowGroupSize)
                 .withDictionaryEncoding(true)
-                .withWriterVersion(ParquetWriter.DEFAULT_WRITER_VERSION)
+                .withWriterVersion(writerVersion)
                 .build();
 
         return new ParquetDatapointWriter(writer, path);

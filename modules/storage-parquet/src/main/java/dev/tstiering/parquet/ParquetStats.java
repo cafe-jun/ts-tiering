@@ -59,6 +59,53 @@ public final class ParquetStats {
         }
     }
 
+    /** 행 그룹 하나에 담긴 어떤 열의 값 범위. 없으면(통계 미기록) {@code null}. */
+    public record ColumnRange(long rows, String min, String max) {
+        public boolean contains(String value) {
+            return min != null && max != null
+                    && min.compareTo(value) <= 0 && max.compareTo(value) >= 0;
+        }
+    }
+
+    /**
+     * 행 그룹별 열 범위. <b>행 그룹 프루닝이 실제로 걸리는지에 대한 직접 증거</b>다.
+     *
+     * <p>쿼리 엔진은 이 min/max 를 보고 행 그룹을 통째로 건너뛴다. 파일 안에서 해당 열이
+     * 정렬돼 있으면 범위가 좁아 잘 걸리고, 흩어져 있으면 모든 행 그룹의 범위가 전체 구간이라
+     * 하나도 못 건너뛴다. 그 차이를 재려고 만든 것이다.
+     */
+    public static List<ColumnRange> rowGroupRanges(Path file, String column) throws IOException {
+        ParquetMetadata footer = readFooter(new LocalInputFile(file));
+        List<ColumnRange> ranges = new ArrayList<>();
+
+        for (BlockMetaData block : footer.getBlocks()) {
+            ColumnRange found = null;
+            for (ColumnChunkMetaData col : block.getColumns()) {
+                if (!String.join(".", col.getPath().toArray()).equals(column)) continue;
+                var stats = col.getStatistics();
+                found = stats == null || stats.isEmpty() || !stats.hasNonNullValue()
+                        ? new ColumnRange(block.getRowCount(), null, null)
+                        : new ColumnRange(block.getRowCount(), stats.minAsString(), stats.maxAsString());
+                break;
+            }
+            ranges.add(found != null ? found : new ColumnRange(block.getRowCount(), null, null));
+        }
+        return ranges;
+    }
+
+    /**
+     * 값 하나로 거를 때 읽어야 하는 행 그룹 수. 프루닝 시뮬레이션이다.
+     * 반환값이 전체 행 그룹 수와 같으면 프루닝이 전혀 안 걸린다는 뜻이다.
+     */
+    public static int rowGroupsMatching(Path file, String column, String value) throws IOException {
+        int matched = 0;
+        for (ColumnRange r : rowGroupRanges(file, column)) {
+            // 통계가 없으면 건너뛸 근거가 없으므로 읽어야 하는 쪽으로 센다.
+            if (r.min() == null || r.contains(value)) matched++;
+        }
+        return matched;
+    }
+
     public static FileStat read(Path file) throws IOException {
         ParquetMetadata footer = readFooter(new LocalInputFile(file));
 

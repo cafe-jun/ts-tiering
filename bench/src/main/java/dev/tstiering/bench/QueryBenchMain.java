@@ -9,15 +9,17 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * W4 — DuckDB 로 S3 의 Parquet 을 직접 조회한다.
+ * W4~W6 — DuckDB 로 S3 의 Parquet 을 직접 조회한다.
  *
- * <p>여기서 정의하는 쿼리 3종은 <b>W5~W6 파티셔닝 비교에서도 그대로 쓰인다.</b>
- * 스킴이 바뀌면 경로만 바뀌고 쿼리 본문은 고정이어야 비교가 성립한다.
+ * <p>쿼리 3종의 <b>의미</b>는 스킴이 바뀌어도 고정이다. 다만 술어가 참조하는 열은 스킴마다
+ * 달라진다 — 경로에 `tenant=` 가 있으면 파티션 열로 걸러지고, 없으면 파일 안의 `tenant_id` 를
+ * 읽어야 한다. 그 차이가 곧 스킴의 성능이므로, 억지로 같은 SQL 을 쓰는 것이 오히려 비교를 망친다.
+ * ({@link SchemeShape} 가 실행 시점에 무엇이 있는지 물어본다.)
  *
  * <pre>
  * docker compose -f deploy/docker-compose.dev.yml up -d
  * ./gradlew :bench:query --args="--iterations=20"
- * ./gradlew :bench:query --args="--iterations=1 --explain=true"
+ * ./gradlew :bench:query --args="--prefixes=A-date,B-date,C-date --iterations=10"
  * </pre>
  */
 public final class QueryBenchMain {
@@ -26,12 +28,17 @@ public final class QueryBenchMain {
     }
 
     /**
-     * DuckDB 가 EXPLAIN ANALYZE 에 찍는 {@code Scanning Files: X/Y}.
-     * 파티션 프루닝이 실제로 걸렸는지에 대한 직접 증거다.
+     * DuckDB 가 {@code EXPLAIN ANALYZE} 에 찍는 스캔 실적.
+     *
+     * @param httpBytesIn 캐시가 빈 새 연결에서 잰 <b>실제 전송 바이트</b>
      */
-    record ScanStats(int filesScanned, int filesListed) {
+    record ScanStats(int filesScanned, int filesListed, long httpBytesIn, int httpGets) {
         double prunedAway() {
-            return filesListed == 0 ? 0 : 100.0 * (filesListed - filesScanned) / filesListed;
+            return filesListed <= 0 ? 0 : 100.0 * (filesListed - filesScanned) / filesListed;
+        }
+
+        double mibIn() {
+            return httpBytesIn < 0 ? 0 : httpBytesIn / 1024.0 / 1024.0;
         }
     }
 
@@ -43,9 +50,12 @@ public final class QueryBenchMain {
         double p95() {
             return percentile(warmMs, 0.95);
         }
+    }
 
-        double min() {
-            return warmMs.length == 0 ? 0 : warmMs[0];
+    record PrefixResult(String prefix, SchemeShape shape, long objectCount, long objectBytes,
+                        double listMs, List<Result> results) {
+        double avgFileKiB() {
+            return objectCount == 0 ? 0 : objectBytes / (double) objectCount / 1024.0;
         }
     }
 
@@ -53,53 +63,67 @@ public final class QueryBenchMain {
         BenchArgs opts = BenchArgs.parse(args);
 
         String bucket = opts.string("bucket", "ts-tiering-cold");
-        String prefix = opts.string("prefix", "tenant-profile-date");
+        String key = opts.string("key", "temperature");
         int iterations = (int) opts.number("iterations", 20);
         int warmup = (int) opts.number("warmup", 3);
-        boolean explain = Boolean.parseBoolean(opts.string("explain", "false"));
 
-        String key = opts.string("key", "temperature");
-
-        // 경로 규칙이 스킴마다 달라 깊이가 다르므로 ** 로 받는다.
-        String root = "s3://" + bucket + "/" + prefix;
-        String allKeysSource = "read_parquet('" + root + "/**/*.parquet', hive_partitioning = 1)";
-
-        // 키를 glob 에 박는다. PER_KEY_TYPED(ADR-0002)에서 value 의 물리 타입이 키마다 다르기 때문이다 —
-        // 키를 가로지르는 glob 을 쓰면 DuckDB 가 스키마를 통합하면서 value 를 VARCHAR 로 내려버리고
-        // avg(value) 가 바인딩 에러를 낸다. 실제 쿼리 라우터도 키를 알고 들어오므로 이쪽이 현실적이다.
-        String glob = root + "/**/key=" + key + "/*.parquet";
-        String source = "read_parquet('" + glob + "', hive_partitioning = 1)";
+        List<String> prefixes = Arrays.stream(
+                        opts.string("prefixes", opts.string("prefix", "tenant-profile-date")).split(","))
+                .map(String::trim).filter(s -> !s.isEmpty()).toList();
 
         var generator = opts.generator();
         String tenant = generator.tenantId(0).toString();
         String device = generator.deviceId(0, 0).toString();
 
-        System.out.printf("소스=%s%n반복=%d (워밍업 %d)%n%n", glob, iterations, warmup);
+        System.out.printf("버킷=%s  키=%s  프리픽스 %d개  반복=%d (워밍업 %d)%n%n",
+                bucket, key, prefixes.size(), iterations, warmup);
 
-        List<Query> queries = defineQueries(source, tenant, device);
+        List<PrefixResult> all = new ArrayList<>();
+        for (String prefix : prefixes) {
+            all.add(measure(bucket, prefix, key, tenant, device, iterations, warmup));
+        }
 
-        // 파일당 평균 크기는 S3 쪽에서 정확히 받아온다 — 프루닝된 바이트를 환산하는 데 쓴다.
+        if (all.size() > 1) {
+            printMatrix(all);
+        }
+    }
+
+    // --- 프리픽스 하나 측정 ------------------------------------------------------
+
+    private static PrefixResult measure(String bucket, String prefix, String key,
+                                        String tenant, String device,
+                                        int iterations, int warmup) throws SQLException {
+        String root = "s3://" + bucket + "/" + prefix;
+        String glob = root + "/**/key=" + key + "/*.parquet";
+        String source = "read_parquet('" + glob + "', hive_partitioning = 1)";
+
         long[] objects = objectStats(bucket, prefix + "/", "/key=" + key + "/");
-        double avgFileBytes = objects[0] == 0 ? 0 : objects[1] / (double) objects[0];
-        System.out.printf("키 '%s' 객체: %,d개 / %.1f MiB (평균 %.1f KiB)%n%n",
-                key, objects[0], objects[1] / 1024.0 / 1024.0, avgFileBytes / 1024.0);
+
+        System.out.println("═".repeat(78));
+        System.out.printf("[%s]  객체 %,d개 / %.1f MiB (평균 %.1f KiB)%n",
+                prefix, objects[0], objects[1] / 1024.0 / 1024.0,
+                objects[0] == 0 ? 0 : objects[1] / (double) objects[0] / 1024.0);
+
+        if (objects[0] == 0) {
+            throw new IllegalStateException("프리픽스 '" + prefix + "' 에 객체가 없다 — 적재를 먼저 할 것");
+        }
 
         try (Connection conn = DuckDb.openLocal()) {
-            sanityCheck(conn, allKeysSource);
+            SchemeShape shape = SchemeShape.detect(conn, source);
+            System.out.printf("  술어 열: %s   날짜 범위: %s ~ %s%n",
+                    shape.describe(), shape.firstDate(), shape.lastDate());
 
             double listMs = measureListing(conn, glob);
-            System.out.printf("glob 나열만: %.0fms (%,d개 객체)%n%n", listMs, objects[0]);
+            System.out.printf("  glob 나열만: %.0fms%n", listMs);
 
+            List<Query> queries = defineQueries(source, shape, tenant, device);
             List<Result> results = new ArrayList<>();
             for (Query q : queries) {
-                results.add(run(conn, q, iterations, warmup));
+                results.add(run(conn, q, iterations, warmup, (int) objects[0]));
             }
 
-            report(results, avgFileBytes, listMs);
-
-            if (explain) {
-                explainAll(conn, queries);
-            }
+            printOne(results, listMs);
+            return new PrefixResult(prefix, shape, objects[0], objects[1], listMs, results);
         }
     }
 
@@ -108,64 +132,58 @@ public final class QueryBenchMain {
     /**
      * PHASE1.md 가 정한 3종. 좁은 범위 / 긴 범위 + 집계 / 넓은 범위.
      *
-     * <p>키는 WHERE 절이 아니라 <b>glob 경로</b>에 있다 (위 참고). 나머지 파티션 열
-     * ({@code tenant}, {@code date})은 경로에서 나오므로 프루닝이 걸리고,
-     * {@code device_id} 는 파일 안의 열이라 행 필터다 — 스킴 B 에서는 그렇다.
-     * 스킴 C(`tenant/device/date`)로 바꾸면 {@code device_id} 도 프루닝 대상이 된다.
-     * <b>그 차이를 재는 것이 W5~W6 의 목적이므로 쿼리 본문은 여기서 고정한다.</b>
+     * <p>날짜 창은 <b>데이터에서 뽑은 실제 범위</b>로 만든다. 예전에는 리터럴을 박아뒀는데,
+     * 데이터셋을 30일로 줄이자 Q1 이 조용히 0행을 반환했다.
      */
-    private static List<Query> defineQueries(String source, String tenant, String device) {
+    private static List<Query> defineQueries(String source, SchemeShape shape,
+                                             String tenant, String device) {
+        // 커버 기간의 1/4 지점에서 시작하는 7일 창. 데이터가 짧으면 그에 맞춰 줄인다 —
+        // 고정 리터럴을 쓰면 데이터셋 길이를 바꿀 때마다 0행이 된다.
+        long span = shape.lastDate().toEpochDay() - shape.firstDate().toEpochDay() + 1;
+        long offset = span / 4;
+        long width = Math.max(1, Math.min(7, span - offset));
+        var from = shape.firstDate().plusDays(offset);
+        var to = from.plusDays(width);
+
+        String tenantPred = shape.tenantColumn() + "::VARCHAR = '" + tenant + "'";
+        String devicePred = shape.deviceColumn() + "::VARCHAR = '" + device + "'";
+
         return List.of(
-                new Query("Q1", "단일 디바이스 / 단일 키 / 7일 (좁은 범위)", """
+                new Query("Q1", "단일 디바이스 / 7일 (좁은 범위)", """
                         SELECT ts, value
                         FROM %s
-                        WHERE tenant = '%s'
-                          AND device_id = '%s'
-                          AND date >= '2026-03-01' AND date < '2026-03-08'
+                        WHERE %s AND %s
+                          AND date >= '%s' AND date < '%s'
                         ORDER BY ts
-                        """.formatted(source, tenant, device)),
+                        """.formatted(source, tenantPred, devicePred, from, to)),
 
-                new Query("Q2", "단일 디바이스 / 단일 키 / 1년 일평균 (긴 범위 + 집계)", """
+                new Query("Q2", "단일 디바이스 / 전 기간 일평균 (긴 범위 + 집계)", """
                         SELECT date, avg(value) AS avg_value
                         FROM %s
-                        WHERE tenant = '%s'
-                          AND device_id = '%s'
+                        WHERE %s AND %s
                         GROUP BY date
                         ORDER BY date
-                        """.formatted(source, tenant, device)),
+                        """.formatted(source, tenantPred, devicePred)),
 
-                new Query("Q3", "프로파일 전체 / 단일 키 / 1개월 평균 (넓은 범위)", """
+                new Query("Q3", "프로파일 전체 / 전 기간 평균 (넓은 범위)", """
                         SELECT avg(value) AS avg_value
                         FROM %s
                         WHERE profile = 'industrial-sensor'
-                          AND date >= '2026-03-01' AND date < '2026-04-01'
                         """.formatted(source))
         );
     }
 
     // --- 실행 -----------------------------------------------------------------
 
-    private static void sanityCheck(Connection conn, String source) throws SQLException {
-        long startedAt = System.nanoTime();
-        try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("SELECT count(*) FROM " + source)) {
-            rs.next();
-            long rows = rs.getLong(1);
-            System.out.printf("연결 확인: 전체 %,d 행 (%.1fs)%n", rows, seconds(startedAt));
-            if (rows == 0) {
-                throw new IllegalStateException(
-                        "0행이다. 적재가 안 됐거나 prefix 가 틀렸다 — :bench:ingest --s3=true 를 먼저 돌릴 것");
-            }
-        }
-        System.out.println();
-    }
-
-    private static Result run(Connection conn, Query q, int iterations, int warmup) throws SQLException {
-        // 첫 실행은 따로 잰다. DuckDB 가 Parquet 푸터와 HTTP 메타데이터를 캐시하므로
-        // 2회차부터는 성격이 다른 숫자가 된다. 둘을 섞으면 무엇을 쟀는지 흐려진다.
+    private static Result run(Connection conn, Query q, int iterations, int warmup,
+                              int totalFiles) throws SQLException {
         long startedAt = System.nanoTime();
         long rows = execute(conn, q.sql());
         double coldMs = millis(startedAt);
+
+        if (rows == 0) {
+            throw new IllegalStateException(q.id() + " 이 0행을 반환했다 — 술어가 데이터와 맞지 않는다:\n" + q.sql());
+        }
 
         for (int i = 0; i < warmup; i++) {
             execute(conn, q.sql());
@@ -179,37 +197,22 @@ public final class QueryBenchMain {
         }
         Arrays.sort(warm);
 
-        ScanStats scan = scanStats(conn, q);
+        // DuckDB 는 파일 필터가 하나도 안 걸리거나 파일이 하나뿐일 때 Scanning Files 줄을
+        // 아예 찍지 않는다. 그건 "전부 읽었다"는 뜻이므로 전체 파일 수로 채운다.
+        ScanStats raw = scanStats(q);
+        ScanStats scan = raw.filesScanned() >= 0 ? raw
+                : new ScanStats(totalFiles, totalFiles, raw.httpBytesIn(), raw.httpGets());
 
-        System.out.printf("  %s 완료 — %,d행, 파일 %d/%d, cold %.0fms, warm p50 %.0fms%n",
-                q.id(), rows, scan.filesScanned(), scan.filesListed(), coldMs, percentile(warm, 0.50));
+        System.out.printf("    %s — %,d행, 파일 %d/%d, 전송 %.2f MiB (%d GET), p50 %.0fms%n",
+                q.id(), rows, scan.filesScanned(), scan.filesListed(),
+                scan.mibIn(), scan.httpGets(), percentile(warm, 0.50));
         return new Result(q, rows, coldMs, warm, scan);
-    }
-
-    private static final java.util.regex.Pattern SCANNING_FILES =
-            java.util.regex.Pattern.compile("ScanningFiles:(\\d+)/(\\d+)");
-
-    /** EXPLAIN ANALYZE 출력의 박스 문자를 걷어내고 {@code Scanning Files: X/Y} 를 뽑는다. */
-    private static ScanStats scanStats(Connection conn, Query q) throws SQLException {
-        StringBuilder plan = new StringBuilder();
-        try (Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("EXPLAIN ANALYZE " + q.sql())) {
-            while (rs.next()) {
-                plan.append(rs.getString(rs.getMetaData().getColumnCount()));
-            }
-        }
-        String flat = plan.toString().replaceAll("[│┌┐└┘├┤─\\s]", "");
-        var m = SCANNING_FILES.matcher(flat);
-        return m.find()
-                ? new ScanStats(Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)))
-                : new ScanStats(-1, -1);
     }
 
     private static long execute(Connection conn, String sql) throws SQLException {
         long rows = 0;
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
-            // 결과를 끝까지 소비해야 실제 스캔 시간이 포함된다.
             while (rs.next()) {
                 rows++;
             }
@@ -217,31 +220,51 @@ public final class QueryBenchMain {
         return rows;
     }
 
-    // --- 출력 -----------------------------------------------------------------
+    private static final java.util.regex.Pattern SCANNING_FILES =
+            java.util.regex.Pattern.compile("ScanningFiles:(\\d+)/(\\d+)");
+    private static final java.util.regex.Pattern HTTP_IN =
+            java.util.regex.Pattern.compile("in:([\\d.]+)(bytes|KiB|MiB|GiB)");
+    private static final java.util.regex.Pattern HTTP_GET =
+            java.util.regex.Pattern.compile("#GET:(\\d+)");
 
-    private static void report(List<Result> results, double avgFileBytes, double listMs) {
-        System.out.println("\n=== 쿼리 baseline ===");
-        System.out.printf("%-4s %8s %12s %9s %10s %9s %9s%n",
-                "", "행", "파일", "프루닝", "스캔량", "p50", "p95");
-        System.out.println("-".repeat(66));
-        for (Result r : results) {
-            System.out.printf("%-4s %8d %6d/%-5d %8.1f%% %8.2fMiB %7.1fms %7.1fms%n",
-                    r.query().id(), r.rows(),
-                    r.scan().filesScanned(), r.scan().filesListed(), r.scan().prunedAway(),
-                    r.scan().filesScanned() * avgFileBytes / 1024.0 / 1024.0,
-                    r.p50(), r.p95());
+    /**
+     * {@code EXPLAIN ANALYZE} 를 <b>새 연결</b>에서 돌려 계획과 실제 전송량을 함께 뽑는다.
+     *
+     * <p>연결을 새로 여는 것이 핵심이다. DuckDB 는 Parquet 푸터와 HTTP 응답을 연결 단위로
+     * 캐시하므로 재사용하면 {@code HTTPFS HTTP Stats} 가 전부 0 으로 나온다.
+     */
+    private static ScanStats scanStats(Query q) throws SQLException {
+        StringBuilder plan = new StringBuilder();
+        try (Connection cold = DuckDb.openLocal();
+             Statement st = cold.createStatement();
+             ResultSet rs = st.executeQuery("EXPLAIN ANALYZE " + q.sql())) {
+            while (rs.next()) {
+                plan.append(rs.getString(rs.getMetaData().getColumnCount()));
+            }
         }
-        System.out.println();
-        for (Result r : results) {
-            System.out.printf("  %s  %s%n", r.query().id(), r.query().description());
+        String flat = plan.toString().replaceAll("[│┌┐└┘├┤─\\s]", "");
+
+        int scanned = -1;
+        int listed = -1;
+        var files = SCANNING_FILES.matcher(flat);
+        if (files.find()) {
+            scanned = Integer.parseInt(files.group(1));
+            listed = Integer.parseInt(files.group(2));
         }
 
-        System.out.printf("%n스캔량은 (스캔 파일 수 × 평균 파일 크기 %.1f KiB) 환산치다.%n",
-                avgFileBytes / 1024.0);
-        System.out.println("p50/p95 는 워밍업 후 반복 실행이고, cold(첫 실행)는 위 진행 로그에 있다.");
-        System.out.printf("%n⚠️ 세 쿼리의 스캔량은 %.0f배 차이인데 지연은 거의 같다.%n",
-                results.get(1).scan().filesScanned() / (double) results.get(0).scan().filesScanned());
-        System.out.printf("   glob 나열만으로 %.0fms 가 든다 — 지연을 지배하는 것은 스캔이 아니라 객체 나열이다.%n", listMs);
+        long bytesIn = -1;
+        var in = HTTP_IN.matcher(flat);
+        if (in.find()) {
+            bytesIn = toBytes(Double.parseDouble(in.group(1)), in.group(2));
+        }
+
+        int gets = -1;
+        var get = HTTP_GET.matcher(flat);
+        if (get.find()) {
+            gets = Integer.parseInt(get.group(1));
+        }
+
+        return new ScanStats(scanned, listed, bytesIn, gets);
     }
 
     /** 스캔 없이 파일 목록만 얻는 비용. 지연의 하한선이 된다. */
@@ -257,6 +280,54 @@ public final class QueryBenchMain {
         }
         return best / 1_000_000.0;
     }
+
+    // --- 출력 -----------------------------------------------------------------
+
+    private static void printOne(List<Result> results, double listMs) {
+        System.out.printf("  %-4s %8s %12s %8s %10s %7s %9s %9s%n",
+                "", "행", "파일", "프루닝", "전송", "GET", "p50", "p95");
+        System.out.println("  " + "-".repeat(74));
+        for (Result r : results) {
+            System.out.printf("  %-4s %8d %6d/%-5d %7.1f%% %8.2fMiB %7d %7.1fms %7.1fms%n",
+                    r.query().id(), r.rows(),
+                    r.scan().filesScanned(), r.scan().filesListed(), r.scan().prunedAway(),
+                    r.scan().mibIn(), r.scan().httpGets(), r.p50(), r.p95());
+        }
+        System.out.printf("  (glob 나열만 %.0fms)%n%n", listMs);
+    }
+
+    private static void printMatrix(List<PrefixResult> all) {
+        System.out.println("═".repeat(78));
+        System.out.println("=== 매트릭스 ===\n");
+
+        for (String metric : new String[]{"파일(스캔/전체)", "전송 MiB", "p50 ms"}) {
+            System.out.println("[" + metric + "]");
+            System.out.printf("  %-24s %14s %14s %14s%n", "프리픽스", "Q1", "Q2", "Q3");
+            System.out.println("  " + "-".repeat(70));
+            for (PrefixResult p : all) {
+                System.out.printf("  %-24s", p.prefix());
+                for (Result r : p.results()) {
+                    System.out.printf(" %14s", switch (metric) {
+                        case "파일(스캔/전체)" -> r.scan().filesScanned() + "/" + r.scan().filesListed();
+                        case "전송 MiB" -> String.format("%.2f", r.scan().mibIn());
+                        default -> String.format("%.0f", r.p50());
+                    });
+                }
+                System.out.println();
+            }
+            System.out.println();
+        }
+
+        System.out.println("[형상]");
+        System.out.printf("  %-24s %10s %10s %10s  %s%n", "프리픽스", "객체", "평균KiB", "나열ms", "술어 열");
+        System.out.println("  " + "-".repeat(74));
+        for (PrefixResult p : all) {
+            System.out.printf("  %-24s %10d %10.1f %10.0f  %s%n",
+                    p.prefix(), p.objectCount(), p.avgFileKiB(), p.listMs(), p.shape().describe());
+        }
+    }
+
+    // --- 보조 -----------------------------------------------------------------
 
     /** @return {객체 수, 총 바이트} */
     private static long[] objectStats(String bucket, String prefix, String keySegment) {
@@ -274,19 +345,14 @@ public final class QueryBenchMain {
         }
     }
 
-    private static void explainAll(Connection conn, List<Query> queries) throws SQLException {
-        for (Query q : queries) {
-            System.out.printf("%n=== EXPLAIN ANALYZE %s ===%n", q.id());
-            try (Statement st = conn.createStatement();
-                 ResultSet rs = st.executeQuery("EXPLAIN ANALYZE " + q.sql())) {
-                while (rs.next()) {
-                    System.out.println(rs.getString(rs.getMetaData().getColumnCount()));
-                }
-            }
-        }
+    private static long toBytes(double value, String unit) {
+        return switch (unit) {
+            case "KiB" -> (long) (value * 1024);
+            case "MiB" -> (long) (value * 1024 * 1024);
+            case "GiB" -> (long) (value * 1024 * 1024 * 1024);
+            default -> (long) value;
+        };
     }
-
-    // --- 보조 -----------------------------------------------------------------
 
     private static double percentile(double[] sorted, double p) {
         if (sorted.length == 0) return 0;
@@ -296,9 +362,5 @@ public final class QueryBenchMain {
 
     private static double millis(long startNanos) {
         return (System.nanoTime() - startNanos) / 1_000_000.0;
-    }
-
-    private static double seconds(long startNanos) {
-        return (System.nanoTime() - startNanos) / 1_000_000_000.0;
     }
 }

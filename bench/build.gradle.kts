@@ -72,3 +72,21 @@ tasks.register<JavaExec>("parquetBench") {
     workingDir = rootProject.projectDir
     maxHeapSize = "4g"
 }
+
+// ./gradlew :bench:schemaProbe --args="<프리픽스> [<프리픽스> ...]"
+tasks.register<JavaExec>("schemaProbe") {
+    group = "benchmark"
+    description = "파티션 스킴이 쿼리에 실제로 노출하는 열을 확인한다 (ADR-0004 의 profile 가림 근거)"
+    mainClass.set("dev.tstiering.bench.SchemaProbe")
+    classpath = sourceSets["main"].runtimeClasspath
+    workingDir = rootProject.projectDir
+}
+
+// ./gradlew :bench:colProbe --args="<적재 디렉터리> [<적재 디렉터리> ...]"
+tasks.register<JavaExec>("colProbe") {
+    group = "benchmark"
+    description = "적재 결과의 열별 크기와 인코딩을 찍는다 (W5 의 ts 인코딩 폴백 근거)"
+    mainClass.set("dev.tstiering.bench.ColProbe")
+    classpath = sourceSets["main"].runtimeClasspath
+    workingDir = rootProject.projectDir
+}
