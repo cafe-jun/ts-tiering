@@ -16,14 +16,41 @@ IoT 시계열은 접근 빈도가 극단적으로 비대칭이다.
 
 ## 구조
 
+```mermaid
+flowchart LR
+    K["Kafka<br/>telemetry"]
+
+    subgraph hot["hot — 최근 N일"]
+        C[("Cassandra<br/>ts_kv")]
+    end
+
+    subgraph cold["cold — 전체 기간"]
+        S[("S3<br/>Parquet + ZSTD")]
+    end
+
+    K --> C
+    K --> A["archiver<br/><i>Phase 2</i>"] --> S
+    C -.->|과거 이관| B["backfiller<br/><i>Phase 3</i>"] -.-> S
+
+    Q["Query Router<br/>시간 범위로 라우팅<br/>경계 구간 병합·중복제거"]
+    C --> Q
+    S --> Q
+    Q --> API["REST API"]
+
+    classDef phase2 stroke-dasharray: 4 3
+    class A,Q,API phase2
 ```
-Kafka (telemetry)
-  ├→ Cassandra          hot  : 최근 N일
-  └→ archiver → S3      cold : 전체 기간 (Parquet)
-                 ↑
-     Query Router ──────┘
-     시간 범위로 라우팅 + 경계 구간 병합/중복제거
+
+cold 계층의 객체 키는 [ADR-0004](docs/adr/0004-partition-scheme.md) 가 정한다.
+
 ```
+s3://bucket/tenant=<uuid>/date=<YYYY-MM-DD>/key=<키>/part-N.parquet
+  → tenant_id, device_id, ts, value       (키별 단일 타입, ADR-0002)
+  → 파일 안에서 (device_id, ts) 정렬, Parquet v2
+```
+
+**Phase 1 은 위 그림에서 `S3` 상자 하나만 검증한다.** Kafka·Cassandra·라우터는
+Phase 2 이후이고, 지금은 합성 데이터를 직접 Parquet 으로 써서 저장·조회 특성만 측정했다.
 
 ## 모듈
 
@@ -49,7 +76,7 @@ Kafka (telemetry)
 
 ## 벤치마크
 
-[docs/benchmark/](docs/benchmark/) 참고.
+**[docs/benchmark/](docs/benchmark/README.md) 에 전체 결과와 재현 방법이 정리되어 있다.**
 
 - [W1 기준선](docs/benchmark/w1-baseline.md) — 합성 데이터 생성기와 값 분포 검증
 - [W2 레이아웃 × 코덱](docs/benchmark/w2-parquet-layout.md) — PER_KEY_TYPED + ZSTD 채택 근거
@@ -72,6 +99,10 @@ Kafka (telemetry)
 
 > NDJSON 대비 190배라는 숫자도 나오지만 인용하지 말 것 — Cassandra 자체가 이미 NDJSON 을
 > 16.7배 압축하고 있어서, 그 배수의 대부분은 "JSON 이 뚱뚱했다"는 뜻일 뿐이다.
+
+조회 쪽에서 반복해서 나온 결론은 하나다. **이 규모에서 비용은 바이트가 아니라 객체 수에 붙는다** —
+업로드는 객체당 4.4ms, 조회는 나열만으로 531ms, 디바이스 파티션은 바이트를 26배 줄이고도
+지연이 43배다. 파티션 설계보다 파일 목록을 나열하지 않는 구조(매니페스트 카탈로그)가 먼저다.
 
 ## 개발
 

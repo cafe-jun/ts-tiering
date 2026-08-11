@@ -145,13 +145,24 @@ NDJSON 대비 190.6배, 적재 1,337,299 pt/s. [측정](benchmark/w3-s3-ingest.m
 채택: `tenant=/date=/key=` + `(device_id, ts)` 정렬 + **Parquet v2**.
 원래 스킴 B 대비 저장 −13%, 좁은 질의 전송 −45%.
 
-### W7 — 결과 정리 + 공개
+### W7 — 결과 정리 + 공개 ◐
 
-- `docs/benchmark/` 에 결과표 정리
-- README에 아키텍처 다이어그램 + 핵심 수치
-- **블로그 1편 발행** — "IoT 시계열 Parquet 파티셔닝 실측"
+- `docs/benchmark/` 에 결과표 정리 ✅ — [인덱스](benchmark/README.md)
+- README에 아키텍처 다이어그램 + 핵심 수치 ✅
+- **블로그 발행** — 초안 2편 완료, **발행은 남아 있다**
 
 > 여기서 반드시 외부에 공개한다. 코드를 더 쓰기 전에.
+
+원래 1편 주제였던 "파티셔닝 실측"은 W5~W6 이 끝나야 쓸 수 있어서 2편이 됐고,
+그 자리에 [압축비 분모 이야기](blog/01-compression-ratio-denominator.md)를 먼저 넣었다.
+분모 이야기는 W3 시점에 이미 완결돼 있었고, 리스크표의 "W5~6 에서 이탈"에 대한 대비이기도 하다.
+
+| # | 초안 | 상태 |
+|---|---|---|
+| 1 | [Parquet 압축률 338배가 11.5배가 되기까지](blog/01-compression-ratio-denominator.md) | 발행 대기 |
+| 2 | [파티션을 잘 나눴더니 쿼리가 43배 느려졌다](blog/02-partition-scheme-tradeoff.md) | 발행 대기 |
+
+발행처는 티스토리. 제목·요약·태그는 [blog/README.md](blog/README.md) 참고.
 
 ### W8 — Athena 비교 (실 AWS, 선택)
 
