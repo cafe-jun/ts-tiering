@@ -66,6 +66,8 @@ public final class QueryBenchMain {
         String key = opts.string("key", "temperature");
         int iterations = (int) opts.number("iterations", 20);
         int warmup = (int) opts.number("warmup", 3);
+        // off = glob(현행) / full = 목록 전부 전달 / pruned = 카탈로그가 프루닝까지 수행
+        String manifest = opts.string("manifest", "off");
 
         List<String> prefixes = Arrays.stream(
                         opts.string("prefixes", opts.string("prefix", "tenant-profile-date")).split(","))
@@ -75,12 +77,17 @@ public final class QueryBenchMain {
         String tenant = generator.tenantId(0).toString();
         String device = generator.deviceId(0, 0).toString();
 
-        System.out.printf("버킷=%s  키=%s  프리픽스 %d개  반복=%d (워밍업 %d)%n%n",
-                bucket, key, prefixes.size(), iterations, warmup);
+        System.out.printf("버킷=%s  키=%s  프리픽스 %d개  반복=%d (워밍업 %d)  소스=%s%n%n",
+                bucket, key, prefixes.size(), iterations, warmup,
+                switch (manifest) {
+                    case "full" -> "매니페스트(목록 전부)";
+                    case "pruned" -> "매니페스트(카탈로그가 프루닝)";
+                    default -> "glob";
+                });
 
         List<PrefixResult> all = new ArrayList<>();
         for (String prefix : prefixes) {
-            all.add(measure(bucket, prefix, key, tenant, device, iterations, warmup));
+            all.add(measure(bucket, prefix, key, tenant, device, iterations, warmup, manifest));
         }
 
         if (all.size() > 1) {
@@ -92,39 +99,124 @@ public final class QueryBenchMain {
 
     private static PrefixResult measure(String bucket, String prefix, String key,
                                         String tenant, String device,
-                                        int iterations, int warmup) throws SQLException {
+                                        int iterations, int warmup, String manifest) throws SQLException {
         String root = "s3://" + bucket + "/" + prefix;
         String glob = root + "/**/key=" + key + "/*.parquet";
-        String source = "read_parquet('" + glob + "', hive_partitioning = 1)";
 
-        long[] objects = objectStats(bucket, prefix + "/", "/key=" + key + "/");
+        ObjectSet objects = objectStats(bucket, prefix + "/", "/key=" + key + "/");
 
         System.out.println("═".repeat(78));
         System.out.printf("[%s]  객체 %,d개 / %.1f MiB (평균 %.1f KiB)%n",
-                prefix, objects[0], objects[1] / 1024.0 / 1024.0,
-                objects[0] == 0 ? 0 : objects[1] / (double) objects[0] / 1024.0);
+                prefix, objects.count(), objects.bytes() / 1024.0 / 1024.0,
+                objects.count() == 0 ? 0 : objects.bytes() / (double) objects.count() / 1024.0);
 
-        if (objects[0] == 0) {
+        if (objects.count() == 0) {
             throw new IllegalStateException("프리픽스 '" + prefix + "' 에 객체가 없다 — 적재를 먼저 할 것");
         }
+
+        boolean useManifest = !"off".equals(manifest);
+        String source = useManifest
+                ? manifestSource(bucket, objects.keys())
+                : "read_parquet('" + glob + "', hive_partitioning = 1)";
 
         try (Connection conn = DuckDb.openLocal()) {
             SchemeShape shape = SchemeShape.detect(conn, source);
             System.out.printf("  술어 열: %s   날짜 범위: %s ~ %s%n",
                     shape.describe(), shape.firstDate(), shape.lastDate());
 
-            double listMs = measureListing(conn, glob);
-            System.out.printf("  glob 나열만: %.0fms%n", listMs);
+            double listMs = useManifest ? 0 : measureListing(conn, glob);
+            System.out.printf("  %s: %.0fms%n", useManifest ? "나열 없음(목록 전달)" : "glob 나열만", listMs);
 
             List<Query> queries = defineQueries(source, shape, tenant, device);
+            if ("pruned".equals(manifest)) {
+                queries = pruneManifests(queries, bucket, objects.keys(), shape, tenant, device);
+            }
             List<Result> results = new ArrayList<>();
             for (Query q : queries) {
-                results.add(run(conn, q, iterations, warmup, (int) objects[0]));
+                results.add(run(conn, q, iterations, warmup, objects.count()));
             }
 
             printOne(results, listMs);
-            return new PrefixResult(prefix, shape, objects[0], objects[1], listMs, results);
+            return new PrefixResult(prefix, shape, objects.count(), objects.bytes(), listMs, results);
         }
+    }
+
+    /**
+     * 카탈로그가 <b>메타데이터 단계에서 프루닝까지</b> 수행하는 경우를 흉내낸다.
+     *
+     * <p>Iceberg 의 매니페스트는 파일마다 파티션 값을 들고 있어, 엔진에 넘기기 전에
+     * 조건에 맞는 파일만 골라낼 수 있다. 목록 전부를 넘기는 {@code full} 모드는 나열은 없애지만
+     * 경로 N개를 파싱하고 술어를 평가하는 비용이 남는데, 그건 실제 카탈로그가 내는 비용이 아니다.
+     *
+     * <p>여기서는 경로의 {@code key=value} 를 직접 읽어 거른다. 경로에 없는 축은 거르지 않는다 —
+     * 그게 곧 그 스킴이 카탈로그에 줄 수 있는 정보의 한계이기 때문이다.
+     */
+    private static List<Query> pruneManifests(List<Query> queries, String bucket, List<String> keys,
+                                              SchemeShape shape, String tenant, String device) {
+        long span = shape.lastDate().toEpochDay() - shape.firstDate().toEpochDay() + 1;
+        long offset = span / 4;
+        long width = Math.max(1, Math.min(7, span - offset));
+        var from = shape.firstDate().plusDays(offset);
+        var to = from.plusDays(width);
+
+        List<Query> out = new ArrayList<>();
+        for (Query q : queries) {
+            // Q3 는 파티션 술어가 없어 전부 읽는다. Q1 만 날짜 창이 있다.
+            boolean byIdentity = !q.id().equals("Q3");
+            boolean byDate = q.id().equals("Q1");
+
+            List<String> kept = new ArrayList<>();
+            for (String k : keys) {
+                if (byIdentity && !matches(k, "tenant", tenant)) continue;
+                if (byIdentity && !matches(k, "device", device)) continue;
+                if (byDate && !dateInRange(k, from.toString(), to.toString())) continue;
+                kept.add(k);
+            }
+            if (kept.isEmpty()) {
+                throw new IllegalStateException(q.id() + " 의 프루닝 결과가 비었다 — 경로 파싱이 틀렸다");
+            }
+            System.out.printf("    %s 매니페스트 프루닝: %,d → %,d 파일%n", q.id(), keys.size(), kept.size());
+            out.add(new Query(q.id(), q.description(),
+                    q.sql().replace(manifestSource(bucket, keys), manifestSource(bucket, kept))));
+        }
+        return out;
+    }
+
+    /** 경로에 해당 축이 없으면 거르지 않는다 (그 스킴은 그 정보를 카탈로그에 줄 수 없다). */
+    private static boolean matches(String key, String axis, String value) {
+        int at = key.indexOf(axis + "=");
+        if (at < 0) return true;
+        int start = at + axis.length() + 1;
+        int end = key.indexOf('/', start);
+        return key.substring(start, end < 0 ? key.length() : end).equals(value);
+    }
+
+    private static boolean dateInRange(String key, String fromInclusive, String toExclusive) {
+        int at = key.indexOf("date=");
+        if (at < 0) return true;
+        int start = at + 5;
+        int end = key.indexOf('/', start);
+        String d = key.substring(start, end < 0 ? key.length() : end);
+        return d.compareTo(fromInclusive) >= 0 && d.compareTo(toExclusive) < 0;
+    }
+
+    /**
+     * 파일 목록을 그대로 넘기는 소스. <b>매니페스트 카탈로그의 시뮬레이션</b>이다.
+     *
+     * <p>Iceberg / Delta / Glue 는 파일 목록을 메타데이터로 들고 있어 조회 때 S3 를
+     * 나열하지 않는다. 여기서는 목록을 미리 얻어 SQL 에 그대로 박는다 —
+     * 그 나열은 쿼리 시간 밖에서 한 번만 일어나므로 카탈로그가 하는 일과 같다.
+     *
+     * <p>목록은 <b>프루닝하지 않고 전부</b> 넘긴다. 파티션 프루닝은 여전히 DuckDB 가
+     * 경로에서 파티션 값을 읽어 수행하므로, glob 모드와의 차이는 정확히 "나열 비용" 하나다.
+     */
+    private static String manifestSource(String bucket, List<String> keys) {
+        StringBuilder sb = new StringBuilder("read_parquet([");
+        for (int i = 0; i < keys.size(); i++) {
+            if (i > 0) sb.append(',');
+            sb.append("'s3://").append(bucket).append('/').append(keys.get(i)).append('\'');
+        }
+        return sb.append("], hive_partitioning = 1)").toString();
     }
 
     // --- 쿼리 정의 -------------------------------------------------------------
@@ -329,19 +421,31 @@ public final class QueryBenchMain {
 
     // --- 보조 -----------------------------------------------------------------
 
-    /** @return {객체 수, 총 바이트} */
-    private static long[] objectStats(String bucket, String prefix, String keySegment) {
+    /**
+     * 프리픽스 아래 대상 키의 객체 목록. <b>매니페스트 모드의 입력</b>이기도 하다.
+     *
+     * <p>이 나열은 쿼리 시간에 포함되지 않는다 — 카탈로그가 이미 들고 있는 정보를
+     * 흉내내는 것이므로, 측정 대상은 "그 목록이 있을 때의 쿼리"다.
+     */
+    record ObjectSet(List<String> keys, long bytes) {
+        int count() {
+            return keys.size();
+        }
+    }
+
+    private static ObjectSet objectStats(String bucket, String prefix, String keySegment) {
         try (var store = dev.tstiering.s3.S3ObjectStore.open(
                 dev.tstiering.s3.S3Settings.local(bucket))) {
-            long count = 0;
+            List<String> keys = new ArrayList<>();
             long bytes = 0;
             for (var o : store.list(prefix)) {
                 if (o.key().contains(keySegment)) {
-                    count++;
+                    keys.add(o.key());
                     bytes += o.size();
                 }
             }
-            return new long[]{count, bytes};
+            keys.sort(String::compareTo);   // 실행마다 같은 순서여야 비교가 된다
+            return new ObjectSet(keys, bytes);
         }
     }
 

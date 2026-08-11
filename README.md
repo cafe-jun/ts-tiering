@@ -6,7 +6,8 @@
 IoT 시계열 데이터를 hot(Cassandra) / cold(S3 Parquet) 계층으로 나누고,
 **조회하는 쪽은 그 경계를 모르게** 만드는 티어링 계층.
 
-> 상태: **Phase 1 / W6 완료** (남은 것: W7 공개, W8 Athena) — [계획](docs/PHASE1.md) · [벤치마크](docs/benchmark/) · [ADR](docs/adr/)
+> 상태: **Phase 1 측정 완료** (남은 것: 블로그 발행) — [계획](docs/PHASE1.md) · [벤치마크](docs/benchmark/README.md) · [ADR](docs/adr/)
+> AWS 는 쓰지 않는다. Athena 비교는 수행하지 않았고 그 사실을 [PHASE1.md](docs/PHASE1.md) 에 명시했다.
 
 ## 문제
 
@@ -85,6 +86,7 @@ Phase 2 이후이고, 지금은 합성 데이터를 직접 Parquet 으로 써서
 - [W3 Cassandra 기준선](docs/benchmark/w3-cassandra-baseline.md) — 같은 데이터가 `ts_kv` 로 **11.79 bytes/행**
 - [W4 DuckDB 조회](docs/benchmark/w4-duckdb-baseline.md) — 프루닝은 99.4% 걸리는데 **지연은 객체 나열이 지배한다**
 - [W5~W6 파티션 스킴](docs/benchmark/w5-partition-schemes.md) — 디바이스 파티션은 **바이트 26배 절감, 지연 43배 악화**
+- [W6 보강 — 매니페스트](docs/benchmark/w6-manifest-vs-glob.md) — 카탈로그가 프루닝까지 하면 순위가 뒤집힌다 (**182배**)
 
 ### 핵심 수치
 
