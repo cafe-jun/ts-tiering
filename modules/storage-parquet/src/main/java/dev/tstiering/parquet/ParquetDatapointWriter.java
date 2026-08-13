@@ -29,6 +29,18 @@ public final class ParquetDatapointWriter implements Closeable {
     /** 기본 128MiB. row group 이 클수록 압축률과 프루닝 효율이 오르지만 쓰기 메모리를 더 쓴다. */
     public static final int DEFAULT_ROW_GROUP_SIZE = 128 * 1024 * 1024;
 
+    /**
+     * ADR-0004 에 따라 v2 가 기본이다. parquet-java 의 기본값은 {@code PARQUET_1_0} 인데,
+     * 그 버전에는 {@code DELTA_BINARY_PACKED} 가 없어 정렬된 {@code ts} 가
+     * {@code PLAIN}(8바이트/행)으로 폴백해 저장이 1.55배로 뛴다 (W5).
+     *
+     * <p>이 상수를 {@link PartitionedParquetWriter} 에만 두면 4-인자 {@code open()} 을 쓰는
+     * 호출자가 조용히 v1 을 받는다 — 프로젝트가 스스로 발견한 함정을 자기 기본값으로 반복하는 꼴이다.
+     * W2 재현처럼 v1 이 필요한 곳은 명시적으로 넘길 것.
+     */
+    public static final ParquetProperties.WriterVersion DEFAULT_WRITER_VERSION =
+            ParquetProperties.WriterVersion.PARQUET_2_0;
+
     private final ParquetWriter<Datapoint> writer;
     private final Path path;
 
@@ -49,7 +61,7 @@ public final class ParquetDatapointWriter implements Closeable {
                                               TsValue.Kind fixedKind,
                                               CompressionCodecName codec,
                                               int rowGroupSize) throws IOException {
-        return open(path, layout, fixedKind, codec, rowGroupSize, ParquetWriter.DEFAULT_WRITER_VERSION);
+        return open(path, layout, fixedKind, codec, rowGroupSize, DEFAULT_WRITER_VERSION);
     }
 
     /**

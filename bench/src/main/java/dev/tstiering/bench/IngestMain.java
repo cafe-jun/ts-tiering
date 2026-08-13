@@ -159,7 +159,7 @@ public final class IngestMain {
                             r.mib(), r.elapsed().toMillis(), r.parts(), r.key()));
 
             System.out.println("\n⚠️ MinIO 는 실 S3 가 아니다. 위 시간은 루프백 + MinIO 오버헤드이고");
-            System.out.println("   네트워크 지연을 포함하지 않는다. 절대 처리량은 W8(실 AWS)에서 다시 잰다.");
+            System.out.println("   네트워크 지연을 포함하지 않는다. AWS 는 범위 밖이라 절대 처리량은 미검증이다.");
         }
     }
 

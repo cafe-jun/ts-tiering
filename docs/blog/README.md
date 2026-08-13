@@ -11,7 +11,7 @@
 |---|---|---|---|
 | 1 | [Parquet 압축률 338배가 11.5배가 되기까지](01-compression-ratio-denominator.md) | 초안 | |
 | 2 | [파티션을 잘 나눴더니 쿼리가 43배 느려졌다](02-partition-scheme-tradeoff.md) | 초안 | |
-| 3 | (예정) DuckDB vs Athena — 어느 규모에서 갈리는가 | W8 이후 | |
+| ~~3~~ | ~~DuckDB vs Athena~~ | 취소 (AWS 범위 밖) | |
 
 ### 2편 — 발행 정보
 

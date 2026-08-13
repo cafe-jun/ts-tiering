@@ -57,7 +57,7 @@ public final class PartitionedParquetWriter implements Closeable {
      * {@code PLAIN}(8바이트/행)으로 폴백한다 — 정렬의 이점을 통째로 가린다 (W5).
      */
     public static final org.apache.parquet.column.ParquetProperties.WriterVersion DEFAULT_WRITER_VERSION =
-            org.apache.parquet.column.ParquetProperties.WriterVersion.PARQUET_2_0;
+            ParquetDatapointWriter.DEFAULT_WRITER_VERSION;
 
     /** 행마다 dataSize() 를 부르면 그 자체가 비싸다. 이 간격으로만 확인한다. */
     private static final int SIZE_CHECK_INTERVAL = 8192;

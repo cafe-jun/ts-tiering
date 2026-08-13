@@ -94,7 +94,8 @@ implementation("org.xerial.snappy:snappy-java:1.1.10.7")
 
 3번 때문에 `ParquetFileReader` 로 레코드를 읽을 수 없다. 다만 이게 설계상 문제가 되지 않는다.
 
-- **쿼리 경로**는 애초에 DuckDB/Athena 가 담당한다 (W4, W8). Java 가 Parquet 을 읽을 일이 없다
+- **쿼리 경로**는 애초에 쿼리 엔진이 담당한다 (W4, [ADR-0003](0003-query-engine.md)).
+  Java 가 Parquet 을 읽을 일이 없다
 - **`reconciler`** 는 건수 대조가 목적인데, 행 수는 **푸터에만 읽어도 나온다**.
   데이터 페이지를 건드릴 필요가 없으므로 이 제약과 무관하다
 

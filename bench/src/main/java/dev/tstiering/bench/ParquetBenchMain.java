@@ -58,7 +58,11 @@ public final class ParquetBenchMain {
             for (CompressionCodecName codec : CODECS) {
                 Path file = outDir.resolve(layout.name().toLowerCase() + "-" + codec.name().toLowerCase() + ".parquet");
                 results.add(time(layout.name(), codec.name(), 1, () -> {
-                    try (ParquetDatapointWriter w = ParquetDatapointWriter.open(file, layout, null, codec)) {
+                    // W2 재현 전용이라 라이터 버전을 v1 로 고정한다. 그 표가 v1 에서 나왔다.
+                    try (ParquetDatapointWriter w = ParquetDatapointWriter.open(
+                            file, layout, null, codec,
+                            ParquetDatapointWriter.DEFAULT_ROW_GROUP_SIZE,
+                            org.apache.parquet.column.ParquetProperties.WriterVersion.PARQUET_1_0)) {
                         generator.generate(count, dp -> uncheckedWrite(w, dp));
                     }
                     return sizeOf(file);
