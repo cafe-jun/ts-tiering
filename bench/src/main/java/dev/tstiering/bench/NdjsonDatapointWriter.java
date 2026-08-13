@@ -21,14 +21,33 @@ public final class NdjsonDatapointWriter implements Closeable {
     private final JsonGenerator json;
 
     public NdjsonDatapointWriter(Path path) throws IOException {
-        if (path.getParent() != null) {
-            Files.createDirectories(path.getParent());
-        }
-        this.out = new BufferedOutputStream(Files.newOutputStream(path), 1 << 20);
+        this(openFile(path));
+    }
+
+    private NdjsonDatapointWriter(OutputStream out) throws IOException {
+        this.out = out;
         this.json = new JsonFactory().createGenerator(out);
         MinimalPrettyPrinter printer = new MinimalPrettyPrinter();
         printer.setRootValueSeparator("\n");
         json.setPrettyPrinter(printer);
+    }
+
+    /**
+     * 디스크에 쓰지 않고 바이트 수만 센다.
+     *
+     * <p>1 년치 기준선(A안 = 1.34억 건)은 NDJSON 으로 약 25 GB 다. 그런데 W1/W2 문서가
+     * 결론 낸 대로 NDJSON 은 <b>보고용 분모가 아니고</b>(정직한 분모는 Cassandra 실디스크),
+     * W1/W2 와의 연속성을 위해 숫자만 있으면 된다. 25 GB 를 실제로 만들 이유가 없다.
+     */
+    public static NdjsonDatapointWriter counting(CountingOutputStream sink) throws IOException {
+        return new NdjsonDatapointWriter(sink);
+    }
+
+    private static OutputStream openFile(Path path) throws IOException {
+        if (path.getParent() != null) {
+            Files.createDirectories(path.getParent());
+        }
+        return new BufferedOutputStream(Files.newOutputStream(path), 1 << 20);
     }
 
     public void write(Datapoint dp) {

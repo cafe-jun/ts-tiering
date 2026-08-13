@@ -1,0 +1,56 @@
+# 로컬 개발용 S3. Phase 1 은 회사 인프라도 실 AWS 도 건드리지 않는다 (PHASE1.md 범위).
+#
+#   docker compose -f deploy/docker-compose.dev.yml up -d
+#   docker compose -f deploy/docker-compose.dev.yml down -v
+#
+# 계획서에는 LocalStack 이라고 적혀 있지만 MinIO 를 쓴다.
+# LocalStack 커뮤니티 이미지(:s3-latest 포함)는 2026-03 릴리스로 단종됐고
+# 지금은 localstack/localstack-pro + 라이선스 토큰이 있어야 기동한다 (없으면 exit 55).
+# MinIO 는 S3 API 호환이고 multipart 도 그대로 지원하므로 재는 대상이 바뀌지 않는다.
+#
+# ⚠️ 측정 해석 주의: MinIO 도 실 S3 가 아니다.
+# 여기서 나오는 업로드 시간은 루프백 + MinIO 오버헤드이지 네트워크 지연이 아니다.
+# 이 숫자로 답할 수 있는 것은 "파일 크기 / 파트 크기에 따른 상대적 경향"까지이고,
+# AWS 는 이 프로젝트의 범위 밖이라 절대 처리량은 미검증으로 남는다.
+
+services:
+  s3:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: ts-tiering-s3
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # 웹 콘솔
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      # CreateBucket 이 보내는 LocationConstraint 와 어긋나면 InvalidLocationConstraint 로 거부된다.
+      MINIO_REGION: ap-northeast-2
+    # 볼륨을 붙이지 않는다 — 컨테이너를 내리면 데이터도 사라진다.
+    # 벤치마크는 매번 깨끗한 상태에서 시작하는 편이 낫다.
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  # 압축률의 "정직한 분모"를 재기 위한 것. Phase 1 은 회사 Cassandra 에 접속하지 않는다 —
+  # ThingsBoard 의 ts_kv 스키마를 로컬에 그대로 세워 SSTable 크기를 실측한다.
+  # 필요할 때만 띄운다:  docker compose -f deploy/docker-compose.dev.yml up -d cassandra
+  cassandra:
+    image: cassandra:4.1.11
+    container_name: ts-tiering-cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: ts-tiering
+      # 기본값(1/4 RAM)이면 이 머신에서 과하게 잡는다. 측정에 필요한 만큼만.
+      MAX_HEAP_SIZE: 2G
+      HEAP_NEWSIZE: 400M
+    healthcheck:
+      test: ["CMD-SHELL", "nodetool status | grep -q '^UN'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s

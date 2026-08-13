@@ -55,6 +55,18 @@ public final class SyntheticDataGenerator {
         return ((long) tenantIdx << 32) ^ deviceIdx;
     }
 
+    /**
+     * 벤치마크 쿼리가 WHERE 절에 박을 식별자. 생성기와 같은 자리에서 만들어야
+     * 디바이스 수를 바꿨을 때 쿼리가 조용히 0행을 반환하는 일이 없다.
+     */
+    public UUID tenantId(int tenantIdx) {
+        return tenantIds[tenantIdx];
+    }
+
+    public UUID deviceId(int tenantIdx, int deviceIdx) {
+        return deviceIds[tenantIdx][deviceIdx];
+    }
+
     public long pointsPerTick() {
         return (long) config.tenants() * config.devicesPerTenant() * sensors.size();
     }
