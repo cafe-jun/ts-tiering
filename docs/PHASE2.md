@@ -65,7 +65,9 @@ Phase 2 진입 전에 Phase 1 코드를 검토해서 찾은 것들이다. **Phas
 벤치가 매 실행 전에 트리를 지우고(`IngestMain` 의 `deleteRecursively`), 입력이 합성 데이터라
 안전한 키만 들어오기 때문이다. Phase 2 에서는 둘 다 성립하지 않는다.
 
-### 1. 재시작하면 기존 part 파일을 조용히 덮어쓴다 (유실)
+> **1번과 2번은 2026-08-15 에 고쳤다** (아래 각 항목 참고). 3번은 남아 있다.
+
+### 1. 재시작하면 기존 part 파일을 조용히 덮어쓴다 (유실) ✅ 수정됨
 
 `PartitionedParquetWriter` 의 part 번호는 **인메모리 맵**에서만 온다
 (`nextPart`, 파일:167·256). 새 프로세스는 이 맵이 비어 있으니 모든 파티션에서 `part-0` 부터
@@ -76,13 +78,16 @@ archiver 재시작(배포·OOM·컨테이너 재기동) 때마다 이전 part �
 **로컬 디스크 단계에서 사라지므로 업로드 실패 로그조차 남지 않는다.**
 Kafka 오프셋은 커밋됐고 hot 은 TTL 로 지워졌는데 cold 에는 없는 상태가 만들어진다.
 
-**W2 착수 전에 고칠 것:** 파일명을 충돌 불가능하게 바꾸고
-(`part-<writerId>-<openedAt>-<seq>.parquet`, writerId 는 인스턴스 단위 UUID),
-`deleteIfExists` 를 지워 이미 있으면 예외가 나게 한다.
-임시 경로에 쓰고 close 성공 후 atomic move 하는 패턴을 함께 쓰면
-미완성 파일이 업로드 후보에 섞이는 문제도 같이 막힌다.
+**수정 (2026-08-15):** 파일명이 `part-<writerId>-<seq>.parquet` 이 됐다.
+`writerId` 는 인스턴스별 UUID 앞 8자라 재시작하면 다른 값이 나온다.
+`ParquetDatapointWriter` 의 `deleteIfExists` 도 제거해서, 같은 경로가 이미 있으면
+`ParquetWriter` 의 기본 모드(CREATE)가 예외를 던진다 — 조용히 지우는 대신 시끄럽게 실패한다.
+회귀 테스트: `PartitionedParquetWriterTest#secondWriterInstanceDoesNotOverwriteFirstOnesFiles`.
 
-### 2. 디바이스가 보내는 `key` 가 검증 없이 객체 경로가 된다
+**남은 것:** 임시 경로에 쓰고 close 성공 후 atomic move 하는 패턴.
+미완성 파일이 업로드 후보에 섞이는 문제는 아직 열려 있다 (W2 에서).
+
+### 2. 디바이스가 보내는 `key` 가 검증 없이 객체 경로가 된다 ✅ 수정됨
 
 `PartitionedParquetWriter:183` 이 `dp.key()` 를, `HivePartitionSpecs:69,87` 이
 `dp.deviceProfile()` 을 그대로 경로에 붙인다. `Datapoint` 의 검증은 `requireNonNull` 뿐이다.
@@ -92,11 +97,19 @@ Phase 2 archiver 는 Kafka 에서 **임의의 ThingsBoard 키**를 받는다.
 `a/b` 는 디렉터리를 한 단계 더 파고, `../../x` 는 root 밖으로 나가며,
 `=` 나 공백이 들어간 키는 Hive 파티션 파싱과 DuckDB glob 을 깨뜨린다.
 
-**W2 착수 전에 고칠 것:** 화이트리스트(`[A-Za-z0-9._-]`)로 검증해 위반은 거부하고
-격리 파티션으로 흘린다. 거부할지 퍼센트 인코딩할지는 **읽기/쓰기 양쪽 계약**이라
-ADR 로 남겨야 한다 — 인코딩을 택하면 쿼리 쪽 glob 생성도 같은 규칙을 써야 한다.
+**수정 (2026-08-15):** `PartitionValues` 가 화이트리스트(`[A-Za-z0-9._-]`, 128자)로 검증한다.
+검증 지점은 도메인 객체가 아니라 **경로를 만드는 라이터**다 — 슬래시가 든 키가 텔레메트리로는
+정당할 수 있고, 문제는 그게 객체 키가 될 때 생기기 때문이다.
+값은 몇 개뿐이므로 검증 결과를 캐시해 행마다 정규식을 돌리지 않는다.
 
-### 3. IO 실패 시 파일 핸들이 샌다
+**인코딩하지 않고 거부한다.** 퍼센트 인코딩은 쓰기와 읽기가 같은 규칙을 써야 하는 양쪽 계약이고
+쿼리 쪽 glob 생성까지 그 규칙을 알아야 한다. 그 복잡도를 지금 감당할 이유가 없다.
+회귀 테스트: `PathEscapeTest`(라이터가 실제로 막는지), `PartitionValuesTest`(규칙 자체).
+
+**남은 것:** 거부된 키를 격리 파티션으로 흘리는 경로. 지금은 예외를 던지고 끝난다 —
+archiver 에서는 한 건 때문에 컨슈머가 멈추면 안 되므로 W2 에서 처리해야 한다.
+
+### 3. IO 실패 시 파일 핸들이 샌다 (미수정)
 
 `close()` 는 `closed = true` 를 루프 앞에서 세워 재호출이 무의미하고,
 `evictUntilWithinLimit` 은 `closeFile` 보다 `it.remove()` 를 먼저 해서 실패한 슬롯을 잃는다.

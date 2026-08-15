@@ -46,12 +46,37 @@ class PartitionedParquetWriterTest {
             writer.write(point(0, "temperature", START + 3_600_000L, new TsValue.DoubleValue(20.4)));
         }
 
-        List<String> rel = parquetFiles(root).stream().map(p -> root.relativize(p).toString()).toList();
+        // 파일명에는 인스턴스 식별자가 들어가므로(재시작 시 덮어쓰기 방지) 디렉터리만 비교한다.
+        List<String> dirs = parquetFiles(root).stream()
+                .map(p -> root.relativize(p.getParent()).toString())
+                .sorted()
+                .toList();
         assertEquals(List.of(
-                "tenant=" + TENANT + "/profile=industrial-sensor/date=2026-01-01/hour=00/key=running/part-0.parquet",
-                "tenant=" + TENANT + "/profile=industrial-sensor/date=2026-01-01/hour=00/key=temperature/part-0.parquet",
-                "tenant=" + TENANT + "/profile=industrial-sensor/date=2026-01-01/hour=01/key=temperature/part-0.parquet"
-        ), rel);
+                "tenant=" + TENANT + "/profile=industrial-sensor/date=2026-01-01/hour=00/key=running",
+                "tenant=" + TENANT + "/profile=industrial-sensor/date=2026-01-01/hour=00/key=temperature",
+                "tenant=" + TENANT + "/profile=industrial-sensor/date=2026-01-01/hour=01/key=temperature"
+        ), dirs);
+    }
+
+    /**
+     * 재시작 유실 방지. part 번호는 인메모리라 새 인스턴스가 0부터 다시 세는데,
+     * 파일명이 번호만으로 정해지면 이전 데이터를 조용히 덮어쓴다.
+     */
+    @Test
+    void secondWriterInstanceDoesNotOverwriteFirstOnesFiles(@TempDir Path root) throws IOException {
+        var config = PartitionedParquetWriter.Config.of(
+                root, HivePartitionSpecs.dateOnly(), CompressionCodecName.ZSTD);
+
+        try (var first = new PartitionedParquetWriter(config)) {
+            first.write(point(0, "temperature", START, new TsValue.DoubleValue(20.1)));
+        }
+        // archiver 재기동을 흉내낸다 — 같은 설정, 같은 파티션, 새 인스턴스
+        try (var second = new PartitionedParquetWriter(config)) {
+            second.write(point(0, "temperature", START, new TsValue.DoubleValue(20.2)));
+        }
+
+        assertEquals(2, parquetFiles(root).size(),
+                "두 번째 인스턴스가 첫 번째의 파일을 덮어썼다 — 재시작마다 유실이 난다");
     }
 
     /**

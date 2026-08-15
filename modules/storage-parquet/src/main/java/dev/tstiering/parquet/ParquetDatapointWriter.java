@@ -78,7 +78,11 @@ public final class ParquetDatapointWriter implements Closeable {
         if (path.getParent() != null) {
             Files.createDirectories(path.getParent());
         }
-        Files.deleteIfExists(path); // Parquet 은 append 를 지원하지 않는다
+        // 존재하는 파일을 지우지 않는다. Parquet 은 append 를 지원하지 않으므로 예전에는
+        // deleteIfExists 로 밀어버렸는데, 그러면 재시작한 프로세스가 이전 데이터를
+        // 조용히 없앤다 — 로컬 단계에서 사라지므로 업로드 실패 로그조차 남지 않는다.
+        // 여기서 지우지 않으면 ParquetWriter 의 기본 모드(CREATE)가 FileAlreadyExistsException 을
+        // 던져 시끄럽게 실패한다. 덮어쓰기가 필요하면 호출자가 명시적으로 지울 것.
 
         MessageType schema = layout == ValueLayout.PER_KEY_TYPED
                 ? ValueLayout.schemaForKind(fixedKind)

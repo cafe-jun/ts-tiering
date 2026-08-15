@@ -20,7 +20,7 @@ import java.util.Map;
  * Datapoint 를 파티션 경로 × 텔레메트리 키로 갈라 Parquet 파일 트리로 쓴다.
  *
  * <pre>
- * &lt;root&gt;/&lt;PartitionSpec 경로&gt;/key=&lt;키&gt;/part-&lt;n&gt;.parquet
+ * &lt;root&gt;/&lt;PartitionSpec 경로&gt;/key=&lt;키&gt;/part-&lt;writerId&gt;-&lt;n&gt;.parquet
  * </pre>
  *
  * <p>{@link PerKeyParquetWriter} 는 키당 파일 하나를 끝까지 열어두는 W2 벤치마크용이다.
@@ -182,7 +182,23 @@ public final class PartitionedParquetWriter implements Closeable {
     /** 슬롯별 다음 part 번호. 축출/롤링 후 다시 열릴 때 파일을 덮어쓰지 않게 한다. */
     private final Map<String, Integer> nextPart = new java.util.HashMap<>();
 
+    /**
+     * 이 라이터 인스턴스의 식별자. 파일명에 들어간다.
+     *
+     * <p>{@link #nextPart} 는 인메모리라 <b>새 프로세스는 part 번호를 0부터 다시 센다.</b>
+     * 파일명이 번호만으로 정해지면 재시작한 archiver 가 이전 part-0 을 덮어쓰게 되고,
+     * 그건 로그도 남지 않는 유실이다. 인스턴스마다 다른 값을 섞어 그 충돌을 구조적으로 없앤다.
+     * (같은 파티션에 여러 part 가 생기는 것은 정상이다 — 재개봉·롤오버가 그렇게 동작한다.)
+     */
+    private final String writerId = java.util.UUID.randomUUID().toString().substring(0, 8);
+
     private final List<Path> closedFiles = new ArrayList<>();
+
+    /**
+     * 이미 검증한 값. 키와 프로파일은 몇 개뿐인데 행마다 정규식을 돌리면 그 자체가 비용이다.
+     * 실패한 값은 담지 않으므로 다음에도 같은 예외가 난다.
+     */
+    private final java.util.Set<String> validated = new java.util.HashSet<>();
 
     private long rows;
     private int rollovers;
@@ -212,6 +228,11 @@ public final class PartitionedParquetWriter implements Closeable {
                 return;
             }
         }
+
+        // 경로를 만들기 직전에 검증한다. 도메인 객체에서 막지 않는 이유는 슬래시가 든 키가
+        // 텔레메트리로는 정당할 수 있기 때문이다 — 문제는 그게 객체 키가 될 때 생긴다.
+        validateOnce(dp.key(), "텔레메트리 키");
+        validateOnce(dp.deviceProfile(), "디바이스 프로파일");
 
         String dir = config.spec().path(dp) + "/key=" + dp.key();
         Slot slot = open.get(dir);
@@ -293,9 +314,17 @@ public final class PartitionedParquetWriter implements Closeable {
 
     // --- 내부 -----------------------------------------------------------------
 
+    private void validateOnce(String value, String what) {
+        if (!validated.contains(value)) {
+            dev.tstiering.core.PartitionValues.requireValid(value, what);
+            validated.add(value);
+        }
+    }
+
     private void openFile(Slot slot) throws IOException {
         int part = nextPart.merge(slot.dir, 1, Integer::sum) - 1;
-        Path path = config.root().resolve(slot.dir).resolve("part-" + part + ".parquet");
+        Path path = config.root().resolve(slot.dir)
+                .resolve("part-" + writerId + "-" + part + ".parquet");
         slot.writer = ParquetDatapointWriter.open(
                 path, ValueLayout.PER_KEY_TYPED, slot.kind, config.codec(),
                 config.rowGroupSize(), config.writerVersion());
