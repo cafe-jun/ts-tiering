@@ -243,6 +243,9 @@ public final class PartitionedParquetWriter implements Closeable {
             open.put(dir, slot);
             evictUntilWithinLimit();
             maxOpenObserved = Math.max(maxOpenObserved, open.size());
+        } else if (slot.writer == null) {
+            // 이전 닫기/롤오버가 실패해 비어 있는 슬롯. 반쯤 죽은 채로 두면 다음 write 가 NPE 를 낸다.
+            openFile(slot);
         } else if (slot.kind != dp.value().kind()) {
             // PER_KEY_TYPED 는 파일 하나에 한 타입만 담는다. 섞이면 스키마와 값이 어긋난다.
             throw new IllegalStateException(
@@ -294,21 +297,37 @@ public final class PartitionedParquetWriter implements Closeable {
         return List.copyOf(closedFiles);
     }
 
+    /**
+     * 열린 파티션을 전부 닫는다. <b>하나가 실패해도 나머지를 계속 닫는다.</b>
+     *
+     * <p>예전에는 {@code closed = true} 를 루프 앞에 세워서, 실패 후 재호출하면 즉시 반환해
+     * 아직 안 닫힌 슬롯이 영영 남았다. {@link IOException} 만 잡은 것도 문제였다 —
+     * 반쯤 죽은 슬롯이 던지는 {@code NullPointerException} 이 루프를 중단시켜
+     * 그 뒤 슬롯 전부를 누출시켰다.
+     */
     @Override
     public void close() throws IOException {
         if (closed) return;
-        closed = true;
 
         IOException first = null;
-        for (Slot slot : open.values()) {
+        Iterator<Map.Entry<String, Slot>> it = open.entrySet().iterator();
+        while (it.hasNext()) {
+            Slot slot = it.next().getValue();
             try {
                 closeFile(slot);
-            } catch (IOException e) {
-                if (first == null) first = e;
-                else first.addSuppressed(e);
+            } catch (IOException | RuntimeException e) {
+                IOException wrapped = e instanceof IOException io
+                        ? io
+                        : new IOException("파티션 '" + slot.dir + "' 닫기 실패", e);
+                if (first == null) first = wrapped;
+                else first.addSuppressed(wrapped);
+            } finally {
+                // closeFile 이 핸들을 닫는 것을 보장하므로 실패해도 남겨둘 이유가 없다.
+                it.remove();
             }
         }
-        open.clear();
+
+        closed = true;
         if (first != null) throw first;
     }
 
@@ -331,17 +350,42 @@ public final class PartitionedParquetWriter implements Closeable {
         slot.rowsInFile = 0;
     }
 
+    /**
+     * 슬롯의 파일을 닫는다. <b>어떤 경로로 실패하든 파일 핸들은 닫는다.</b>
+     *
+     * <p>예전에는 정렬 버퍼를 흘리다 실패하면 {@code writer.close()} 에 도달하지 못해
+     * fd 가 영구히 샜다. 장기 실행 archiver 에서는 일시적 IO 오류 하나가 ulimit 소진까지
+     * 누적된다. 게다가 닫히지 않은 파일은 푸터가 없어 읽을 수도 없는데
+     * {@code closedFiles} 에도 안 잡혀 업로드 후보에서조차 빠진다.
+     *
+     * <p>{@code slot.writer} 를 먼저 떼어내는 것이 요점이다 — 실패해도 반쯤 죽은 참조가 남지 않는다.
+     * 비어 있는 슬롯에 다시 쓰기가 오면 {@link #write} 가 파일을 새로 연다.
+     */
     private void closeFile(Slot slot) throws IOException {
-        if (slot.buffer != null) {
-            slot.buffer.sort(BY_DEVICE_THEN_TS);
-            for (Datapoint dp : slot.buffer) {
-                slot.writer.write(dp);
-            }
-            slot.buffer = new ArrayList<>();
+        ParquetDatapointWriter writer = slot.writer;
+        if (writer == null) {
+            return;   // 이전 실패로 비어 있는 슬롯. 닫을 것이 없다
         }
-        slot.writer.close();
-        closedFiles.add(slot.writer.path());
         slot.writer = null;
+
+        try {
+            if (slot.buffer != null) {
+                slot.buffer.sort(BY_DEVICE_THEN_TS);
+                for (Datapoint dp : slot.buffer) {
+                    writer.write(dp);
+                }
+                slot.buffer = new ArrayList<>();
+            }
+            writer.close();
+            closedFiles.add(writer.path());
+        } catch (IOException | RuntimeException e) {
+            try {
+                writer.close();
+            } catch (Exception alreadyFailing) {
+                e.addSuppressed(alreadyFailing);
+            }
+            throw e;
+        }
     }
 
     /**
@@ -357,8 +401,8 @@ public final class PartitionedParquetWriter implements Closeable {
         while (it.hasNext()) {
             Slot slot = it.next().getValue();
             if (slot.lastTs < cutoff) {
-                it.remove();
                 closeFile(slot);
+                it.remove();
                 watermarkCloses++;
             }
         }
@@ -368,8 +412,9 @@ public final class PartitionedParquetWriter implements Closeable {
         while (open.size() > config.maxOpenWriters()) {
             Iterator<Map.Entry<String, Slot>> it = open.entrySet().iterator();
             Slot eldest = it.next().getValue();
-            it.remove();
+            // 닫기가 성공한 뒤에 지운다. 먼저 지우면 실패한 슬롯을 아무도 다시 만지지 못한다.
             closeFile(eldest);
+            it.remove();
             evictions++;
         }
     }
