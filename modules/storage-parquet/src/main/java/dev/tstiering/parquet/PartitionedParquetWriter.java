@@ -20,7 +20,7 @@ import java.util.Map;
  * Datapoint 를 파티션 경로 × 텔레메트리 키로 갈라 Parquet 파일 트리로 쓴다.
  *
  * <pre>
- * &lt;root&gt;/&lt;PartitionSpec 경로&gt;/key=&lt;키&gt;/part-&lt;n&gt;.parquet
+ * &lt;root&gt;/&lt;PartitionSpec 경로&gt;/key=&lt;키&gt;/part-&lt;writerId&gt;-&lt;n&gt;.parquet
  * </pre>
  *
  * <p>{@link PerKeyParquetWriter} 는 키당 파일 하나를 끝까지 열어두는 W2 벤치마크용이다.
@@ -75,7 +75,8 @@ public final class PartitionedParquetWriter implements Closeable {
             int maxOpenWriters,
             int rowGroupSize,
             boolean sortWithinFile,
-            org.apache.parquet.column.ParquetProperties.WriterVersion writerVersion
+            org.apache.parquet.column.ParquetProperties.WriterVersion writerVersion,
+            ClosePolicy closePolicy
     ) {
         public Config {
             if (targetFileBytes <= 0) throw new IllegalArgumentException("targetFileBytes must be > 0");
@@ -86,23 +87,28 @@ public final class PartitionedParquetWriter implements Closeable {
         public static Config of(Path root, PartitionSpec spec, CompressionCodecName codec) {
             return new Config(root, spec, codec,
                     DEFAULT_TARGET_FILE_BYTES, DEFAULT_MAX_OPEN_WRITERS, DEFAULT_ROW_GROUP_SIZE, false,
-                    DEFAULT_WRITER_VERSION);
+                    DEFAULT_WRITER_VERSION, ClosePolicy.LRU_ONLY);
         }
 
         public Config withTargetFileBytes(long bytes) {
-            return new Config(root, spec, codec, bytes, maxOpenWriters, rowGroupSize, sortWithinFile, writerVersion);
+            return new Config(root, spec, codec, bytes, maxOpenWriters, rowGroupSize, sortWithinFile, writerVersion, closePolicy);
         }
 
         public Config withMaxOpenWriters(int max) {
-            return new Config(root, spec, codec, targetFileBytes, max, rowGroupSize, sortWithinFile, writerVersion);
+            return new Config(root, spec, codec, targetFileBytes, max, rowGroupSize, sortWithinFile, writerVersion, closePolicy);
         }
 
         public Config withRowGroupSize(int size) {
-            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, size, sortWithinFile, writerVersion);
+            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, size, sortWithinFile, writerVersion, closePolicy);
+        }
+
+        public Config withClosePolicy(ClosePolicy policy) {
+            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, rowGroupSize,
+                    sortWithinFile, writerVersion, policy);
         }
 
         public Config withSortWithinFile(boolean sort) {
-            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, rowGroupSize, sort, writerVersion);
+            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, rowGroupSize, sort, writerVersion, closePolicy);
         }
     }
 
@@ -114,7 +120,14 @@ public final class PartitionedParquetWriter implements Closeable {
      * @param rollovers  크기 상한에 걸려 파일을 바꾼 횟수
      * @param evictions  라이터 상한에 걸려 강제로 닫은 횟수
      */
-    public record Stats(long rows, int files, long bytes, int partitions, int rollovers, int evictions) {
+    /**
+     * @param maxOpenObserved 동시에 열려 있던 파티션의 최대치. <b>메모리의 대리 지표</b>다 —
+     *                        Parquet 라이터마다 row group 버퍼를 들고 있으므로
+     *                        이 값 × rowGroupSize 가 힙 상한의 기준이 된다
+     */
+    public record Stats(long rows, int files, long bytes, int partitions,
+                        int rollovers, int evictions, int watermarkCloses, long dropped,
+                        int maxOpenObserved) {
 
         public double averageFileBytes() {
             return files == 0 ? 0 : bytes / (double) files;
@@ -148,6 +161,9 @@ public final class PartitionedParquetWriter implements Closeable {
         ParquetDatapointWriter writer;
         long rowsInFile;
 
+        /** 이 파티션에서 마지막으로 본 이벤트 시각. 워터마크 대비 뒤처지면 닫는다. */
+        long lastTs = Long.MIN_VALUE;
+
         /** {@link Config#sortWithinFile()} 일 때만 채운다. 닫을 때 정렬해서 한꺼번에 쓴다. */
         List<Datapoint> buffer;
 
@@ -166,11 +182,34 @@ public final class PartitionedParquetWriter implements Closeable {
     /** 슬롯별 다음 part 번호. 축출/롤링 후 다시 열릴 때 파일을 덮어쓰지 않게 한다. */
     private final Map<String, Integer> nextPart = new java.util.HashMap<>();
 
+    /**
+     * 이 라이터 인스턴스의 식별자. 파일명에 들어간다.
+     *
+     * <p>{@link #nextPart} 는 인메모리라 <b>새 프로세스는 part 번호를 0부터 다시 센다.</b>
+     * 파일명이 번호만으로 정해지면 재시작한 archiver 가 이전 part-0 을 덮어쓰게 되고,
+     * 그건 로그도 남지 않는 유실이다. 인스턴스마다 다른 값을 섞어 그 충돌을 구조적으로 없앤다.
+     * (같은 파티션에 여러 part 가 생기는 것은 정상이다 — 재개봉·롤오버가 그렇게 동작한다.)
+     */
+    private final String writerId = java.util.UUID.randomUUID().toString().substring(0, 8);
+
     private final List<Path> closedFiles = new ArrayList<>();
+
+    /**
+     * 이미 검증한 값. 키와 프로파일은 몇 개뿐인데 행마다 정규식을 돌리면 그 자체가 비용이다.
+     * 실패한 값은 담지 않으므로 다음에도 같은 예외가 난다.
+     */
+    private final java.util.Set<String> validated = new java.util.HashSet<>();
 
     private long rows;
     private int rollovers;
     private int evictions;
+    private int watermarkCloses;
+    private long dropped;
+    private int maxOpenObserved;
+
+    /** 지금까지 본 최대 이벤트 시각. 워터마크의 정의다. */
+    private long watermark = Long.MIN_VALUE;
+
     private boolean closed;
 
     public PartitionedParquetWriter(Config config) {
@@ -180,6 +219,21 @@ public final class PartitionedParquetWriter implements Closeable {
     public void write(Datapoint dp) throws IOException {
         if (closed) throw new IllegalStateException("이미 닫힌 라이터다");
 
+        ClosePolicy policy = config.closePolicy();
+        if (policy.timeBased()) {
+            // 워터마크를 먼저 올린다. 그래야 새 최대값이 스스로에게 걸려 버려지지 않는다.
+            watermark = Math.max(watermark, dp.ts());
+            if (policy.dropLate() && dp.ts() < watermark - policy.lagMillis()) {
+                dropped++;
+                return;
+            }
+        }
+
+        // 경로를 만들기 직전에 검증한다. 도메인 객체에서 막지 않는 이유는 슬래시가 든 키가
+        // 텔레메트리로는 정당할 수 있기 때문이다 — 문제는 그게 객체 키가 될 때 생긴다.
+        validateOnce(dp.key(), "텔레메트리 키");
+        validateOnce(dp.deviceProfile(), "디바이스 프로파일");
+
         String dir = config.spec().path(dp) + "/key=" + dp.key();
         Slot slot = open.get(dir);
 
@@ -188,6 +242,10 @@ public final class PartitionedParquetWriter implements Closeable {
             openFile(slot);
             open.put(dir, slot);
             evictUntilWithinLimit();
+            maxOpenObserved = Math.max(maxOpenObserved, open.size());
+        } else if (slot.writer == null) {
+            // 이전 닫기/롤오버가 실패해 비어 있는 슬롯. 반쯤 죽은 채로 두면 다음 write 가 NPE 를 낸다.
+            openFile(slot);
         } else if (slot.kind != dp.value().kind()) {
             // PER_KEY_TYPED 는 파일 하나에 한 타입만 담는다. 섞이면 스키마와 값이 어긋난다.
             throw new IllegalStateException(
@@ -197,6 +255,12 @@ public final class PartitionedParquetWriter implements Closeable {
 
         rows++;
         slot.rowsInFile++;
+        slot.lastTs = Math.max(slot.lastTs, dp.ts());
+
+        // 워터마크 스윕은 행마다 하면 O(열린 슬롯)이 곱해진다. 간격을 두고 훑는다.
+        if (config.closePolicy().timeBased() && rows % SIZE_CHECK_INTERVAL == 0) {
+            closeSlotsBehindWatermark();
+        }
 
         if (slot.buffer != null) {
             // 정렬 모드에서는 닫을 때까지 모은다. 크기를 알 수 없으므로 롤링은 걸 수 없다.
@@ -224,7 +288,8 @@ public final class PartitionedParquetWriter implements Closeable {
                 throw new java.io.UncheckedIOException(e);
             }
         }
-        return new Stats(rows, closedFiles.size(), bytes, nextPart.size(), rollovers, evictions);
+        return new Stats(rows, closedFiles.size(), bytes, nextPart.size(),
+                rollovers, evictions, watermarkCloses, dropped, maxOpenObserved);
     }
 
     /** 만들어진 파일 목록. 파일별 크기 분포를 보려면 이걸 쓴다 (small file 정량화). */
@@ -232,54 +297,124 @@ public final class PartitionedParquetWriter implements Closeable {
         return List.copyOf(closedFiles);
     }
 
+    /**
+     * 열린 파티션을 전부 닫는다. <b>하나가 실패해도 나머지를 계속 닫는다.</b>
+     *
+     * <p>예전에는 {@code closed = true} 를 루프 앞에 세워서, 실패 후 재호출하면 즉시 반환해
+     * 아직 안 닫힌 슬롯이 영영 남았다. {@link IOException} 만 잡은 것도 문제였다 —
+     * 반쯤 죽은 슬롯이 던지는 {@code NullPointerException} 이 루프를 중단시켜
+     * 그 뒤 슬롯 전부를 누출시켰다.
+     */
     @Override
     public void close() throws IOException {
         if (closed) return;
-        closed = true;
 
         IOException first = null;
-        for (Slot slot : open.values()) {
+        Iterator<Map.Entry<String, Slot>> it = open.entrySet().iterator();
+        while (it.hasNext()) {
+            Slot slot = it.next().getValue();
             try {
                 closeFile(slot);
-            } catch (IOException e) {
-                if (first == null) first = e;
-                else first.addSuppressed(e);
+            } catch (IOException | RuntimeException e) {
+                IOException wrapped = e instanceof IOException io
+                        ? io
+                        : new IOException("파티션 '" + slot.dir + "' 닫기 실패", e);
+                if (first == null) first = wrapped;
+                else first.addSuppressed(wrapped);
+            } finally {
+                // closeFile 이 핸들을 닫는 것을 보장하므로 실패해도 남겨둘 이유가 없다.
+                it.remove();
             }
         }
-        open.clear();
+
+        closed = true;
         if (first != null) throw first;
     }
 
     // --- 내부 -----------------------------------------------------------------
 
+    private void validateOnce(String value, String what) {
+        if (!validated.contains(value)) {
+            dev.tstiering.core.PartitionValues.requireValid(value, what);
+            validated.add(value);
+        }
+    }
+
     private void openFile(Slot slot) throws IOException {
         int part = nextPart.merge(slot.dir, 1, Integer::sum) - 1;
-        Path path = config.root().resolve(slot.dir).resolve("part-" + part + ".parquet");
+        Path path = config.root().resolve(slot.dir)
+                .resolve("part-" + writerId + "-" + part + ".parquet");
         slot.writer = ParquetDatapointWriter.open(
                 path, ValueLayout.PER_KEY_TYPED, slot.kind, config.codec(),
                 config.rowGroupSize(), config.writerVersion());
         slot.rowsInFile = 0;
     }
 
+    /**
+     * 슬롯의 파일을 닫는다. <b>어떤 경로로 실패하든 파일 핸들은 닫는다.</b>
+     *
+     * <p>예전에는 정렬 버퍼를 흘리다 실패하면 {@code writer.close()} 에 도달하지 못해
+     * fd 가 영구히 샜다. 장기 실행 archiver 에서는 일시적 IO 오류 하나가 ulimit 소진까지
+     * 누적된다. 게다가 닫히지 않은 파일은 푸터가 없어 읽을 수도 없는데
+     * {@code closedFiles} 에도 안 잡혀 업로드 후보에서조차 빠진다.
+     *
+     * <p>{@code slot.writer} 를 먼저 떼어내는 것이 요점이다 — 실패해도 반쯤 죽은 참조가 남지 않는다.
+     * 비어 있는 슬롯에 다시 쓰기가 오면 {@link #write} 가 파일을 새로 연다.
+     */
     private void closeFile(Slot slot) throws IOException {
-        if (slot.buffer != null) {
-            slot.buffer.sort(BY_DEVICE_THEN_TS);
-            for (Datapoint dp : slot.buffer) {
-                slot.writer.write(dp);
-            }
-            slot.buffer = new ArrayList<>();
+        ParquetDatapointWriter writer = slot.writer;
+        if (writer == null) {
+            return;   // 이전 실패로 비어 있는 슬롯. 닫을 것이 없다
         }
-        slot.writer.close();
-        closedFiles.add(slot.writer.path());
         slot.writer = null;
+
+        try {
+            if (slot.buffer != null) {
+                slot.buffer.sort(BY_DEVICE_THEN_TS);
+                for (Datapoint dp : slot.buffer) {
+                    writer.write(dp);
+                }
+                slot.buffer = new ArrayList<>();
+            }
+            writer.close();
+            closedFiles.add(writer.path());
+        } catch (IOException | RuntimeException e) {
+            try {
+                writer.close();
+            } catch (Exception alreadyFailing) {
+                e.addSuppressed(alreadyFailing);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * 워터마크보다 {@code lag} 이상 뒤처진 파티션을 닫는다.
+     *
+     * <p>LRU 축출과 다른 점은 <b>이유가 명시적</b>이라는 것이다. 축출은 "자리가 모자라서"이고
+     * 그 유예 기간은 {@code maxOpenWriters ÷ 동시 파티션 수} 라는 우연한 값이 된다.
+     * 여기서는 "이벤트 시각이 충분히 지나서"이고 그 기준이 설정값으로 드러난다.
+     */
+    private void closeSlotsBehindWatermark() throws IOException {
+        long cutoff = watermark - config.closePolicy().lagMillis();
+        Iterator<Map.Entry<String, Slot>> it = open.entrySet().iterator();
+        while (it.hasNext()) {
+            Slot slot = it.next().getValue();
+            if (slot.lastTs < cutoff) {
+                closeFile(slot);
+                it.remove();
+                watermarkCloses++;
+            }
+        }
     }
 
     private void evictUntilWithinLimit() throws IOException {
         while (open.size() > config.maxOpenWriters()) {
             Iterator<Map.Entry<String, Slot>> it = open.entrySet().iterator();
             Slot eldest = it.next().getValue();
-            it.remove();
+            // 닫기가 성공한 뒤에 지운다. 먼저 지우면 실패한 슬롯을 아무도 다시 만지지 못한다.
             closeFile(eldest);
+            it.remove();
             evictions++;
         }
     }

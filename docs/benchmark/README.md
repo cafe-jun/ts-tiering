@@ -35,6 +35,8 @@ s3://bucket/tenant=<uuid>/date=<YYYY-MM-DD>/key=<키>/part-N.parquet
 | [W3 Cassandra 기준선](w3-cassandra-baseline.md) | 정직한 분모. `ts_kv` 로 11.79 B/행 → **Parquet 이 11.5배 작다** |
 | [W4 DuckDB 조회](w4-duckdb-baseline.md) | 프루닝은 99.4% 걸리는데 **지연은 객체 나열이 지배한다** (531ms) |
 | [W5~W6 파티션 스킴](w5-partition-schemes.md) | 디바이스 파티션은 **바이트 26배 절감 / 지연 43배 악화**. 정렬 + Parquet v2 는 순수 이득 |
+| [W6 보강 매니페스트](w6-manifest-vs-glob.md) | 카탈로그가 **프루닝까지** 해야 순위가 뒤집힌다 (182배). 나열 제거만으로는 부족 |
+| [P2 W1 파티션 닫기](p2w1-partition-closing.md) | Phase 1 은 ts 오름차순을 전제했다. 지연 5%면 파일이 450 → 1,019,755개 |
 
 ## 반복해서 나온 것
 

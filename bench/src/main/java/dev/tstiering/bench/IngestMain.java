@@ -47,6 +47,20 @@ public final class IngestMain {
         CompressionCodecName codec = CompressionCodecName.valueOf(
                 opts.string("codec", "ZSTD").toUpperCase());
         boolean toS3 = Boolean.parseBoolean(opts.string("s3", "false"));
+        LateArrival late = LateArrival.from(opts);
+
+        // 파티션을 언제 닫을지. Phase 1 은 정책이 없어 LRU 축출이 우연한 유예 기간이었다.
+        long lagMinutes = opts.number("close-lag-minutes", 60);
+        var closePolicy = switch (opts.string("close-policy", "lru")) {
+            case "lru" -> dev.tstiering.parquet.ClosePolicy.LRU_ONLY;
+            case "watermark-close" -> dev.tstiering.parquet.ClosePolicy.watermarkClose(
+                    java.time.Duration.ofMinutes(lagMinutes));
+            case "watermark-drop" -> dev.tstiering.parquet.ClosePolicy.watermarkDrop(
+                    java.time.Duration.ofMinutes(lagMinutes));
+            default -> throw new IllegalArgumentException(
+                    "알 수 없는 닫기 정책: " + opts.string("close-policy", "lru")
+                            + " (lru / watermark-close / watermark-drop)");
+        };
 
         // 행 그룹은 KiB 단위로도 지정할 수 있어야 한다. 파일이 32 KiB 대인데 기본 32 MiB 를 쓰면
         // 파일당 행 그룹이 1개뿐이라, 정렬 순서를 바꿔도 행 그룹 프루닝이 성립하지 않는다.
@@ -67,7 +81,8 @@ public final class IngestMain {
                 (int) opts.number("max-open-writers", PartitionedParquetWriter.DEFAULT_MAX_OPEN_WRITERS),
                 (int) rowGroupBytes,
                 sort,
-                writerVersion);
+                writerVersion,
+                closePolicy);
 
         // 스킴/granularity/정렬 조합마다 프리픽스를 갈라야 매트릭스를 한 버킷에 담을 수 있다.
         String s3Prefix = opts.string("s3-prefix", spec.name() + (sort ? "-sorted" : ""));
@@ -75,7 +90,8 @@ public final class IngestMain {
         System.out.printf("count=%,d  스킴=%s  코덱=%s  행그룹=%,d KiB  정렬=%s  라이터=%s  상한=%d%n",
                 count, spec.name(), codec, rowGroupBytes / 1024,
                 sort ? "(device_id, ts)" : "도착 순서(ts)", writerVersion, config.maxOpenWriters());
-        System.out.printf("S3 프리픽스=%s%n", s3Prefix);
+        System.out.printf("S3 프리픽스=%s%n지연 도착=%s  닫기 정책=%s%n",
+                s3Prefix, late.describe(), closePolicy.name());
 
         deleteRecursively(outDir);
 
@@ -83,14 +99,14 @@ public final class IngestMain {
         CountingOutputStream ndjsonSink = new CountingOutputStream();
         long ndjsonStart = System.nanoTime();
         try (NdjsonDatapointWriter w = NdjsonDatapointWriter.counting(ndjsonSink)) {
-            generator.generate(count, w::write);
+            generator.generate(count, w::write);   // 기준선은 순서와 무관하므로 지연을 주지 않는다
         }
         double ndjsonSeconds = seconds(ndjsonStart);
 
         // --- 2) 파티션 Parquet 적재 ---
         long writeStart = System.nanoTime();
         PartitionedParquetWriter writer = new PartitionedParquetWriter(config);
-        generator.generate(count, dp -> uncheckedWrite(writer, dp));
+        generator.generate(count, late, dp -> uncheckedWrite(writer, dp));
         writer.close();
         double writeSeconds = seconds(writeStart);
         var stats = writer.stats();
@@ -135,8 +151,13 @@ public final class IngestMain {
         System.out.printf("파티션 수       : %,d  (이상적인 파일 수의 하한)%n", stats.partitions());
         System.out.printf("파일 수         : %,d%n", stats.files());
         System.out.printf("평균 파일 크기  : %,.1f KiB%n", stats.averageFileBytes() / 1024.0);
-        System.out.printf("롤오버 / 재개봉 : %,d / %,d   (축출 %,d회)%n",
-                stats.rollovers(), stats.reopens(), stats.evictions());
+        System.out.printf("롤오버 / 재개봉 : %,d / %,d   (축출 %,d회, 워터마크 닫기 %,d회)%n",
+                stats.rollovers(), stats.reopens(), stats.evictions(), stats.watermarkCloses());
+        System.out.printf("동시 열린 최대  : %,d 파티션  (메모리 대리 지표)%n", stats.maxOpenObserved());
+        if (stats.dropped() > 0) {
+            System.out.printf("유실           : %,d건 (%.3f%%) — 워터마크를 벗어난 지연 도착%n",
+                    stats.dropped(), 100.0 * stats.dropped() / (stats.rows() + stats.dropped()));
+        }
         if (stats.reopens() > 0) {
             System.out.println("  ⚠️ 재개봉이 있었다 — 축출된 파티션에 데이터가 다시 와서 파일이 쪼개졌다.");
             System.out.println("     --max-open-writers 를 올려야 스킴 간 비교가 공정해진다.");

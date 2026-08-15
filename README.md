@@ -6,7 +6,7 @@
 IoT 시계열 데이터를 hot(Cassandra) / cold(S3 Parquet) 계층으로 나누고,
 **조회하는 쪽은 그 경계를 모르게** 만드는 티어링 계층.
 
-> 상태: **Phase 1 측정 완료** (남은 것: 블로그 발행) — [계획](docs/PHASE1.md) · [벤치마크](docs/benchmark/README.md) · [ADR](docs/adr/)
+> 상태: **Phase 1 완료 / Phase 2 W1 완료** (Phase 1 블로그 2편 발행 대기) — [계획](docs/PHASE1.md) · [벤치마크](docs/benchmark/README.md) · [ADR](docs/adr/)
 > AWS 는 쓰지 않는다. Athena 비교는 수행하지 않았고 그 사실을 [PHASE1.md](docs/PHASE1.md) 에 명시했다.
 
 ## 문제
@@ -74,6 +74,7 @@ Phase 2 이후이고, 지금은 합성 데이터를 직접 Parquet 으로 써서
 - [ADR-0002 — 텔레메트리 값의 Parquet 표현](docs/adr/0002-value-layout.md)
 - [ADR-0003 — 쿼리 엔진](docs/adr/0003-query-engine.md)
 - [ADR-0004 — 파티션 스킴](docs/adr/0004-partition-scheme.md)
+- [ADR-0005 — 파티션 닫기 전략](docs/adr/0005-partition-closing.md)
 
 ## 벤치마크
 
@@ -87,6 +88,7 @@ Phase 2 이후이고, 지금은 합성 데이터를 직접 Parquet 으로 써서
 - [W4 DuckDB 조회](docs/benchmark/w4-duckdb-baseline.md) — 프루닝은 99.4% 걸리는데 **지연은 객체 나열이 지배한다**
 - [W5~W6 파티션 스킴](docs/benchmark/w5-partition-schemes.md) — 디바이스 파티션은 **바이트 26배 절감, 지연 43배 악화**
 - [W6 보강 — 매니페스트](docs/benchmark/w6-manifest-vs-glob.md) — 카탈로그가 프루닝까지 하면 순위가 뒤집힌다 (**182배**)
+- [P2 W1 파티션 닫기](docs/benchmark/p2w1-partition-closing.md) — 지연 5%면 파일이 **450 → 1,019,755개**가 된다
 
 ### 핵심 수치
 
