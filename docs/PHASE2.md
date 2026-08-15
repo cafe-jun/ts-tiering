@@ -146,7 +146,8 @@ Phase 1 과 같은 이유로 명시한다.
 2. ✅ **지연 도착이 있어도 파일 수가 통제된다** — [측정표](benchmark/p2w1-partition-closing.md)
 3. hot/cold 경계를 걸치는 시간 범위 질의가 **중복 없이** 정확한 결과를 낸다
 4. archiver 를 죽였다 살려도 데이터가 유실·중복되지 않는다 (건수 대조로 확인)
-5. ADR 2건 추가 (파티션 닫기 전략 ✅ [ADR-0005](adr/0005-partition-closing.md) / hot-cold 경계 처리)
+5. ADR 3건 추가 (파티션 닫기 ✅ [ADR-0005](adr/0005-partition-closing.md) /
+   archiver 내구성 ✅ [ADR-0006](adr/0006-archiver-durability.md) / hot-cold 경계 처리)
 
 ## 주차별 계획
 
@@ -175,13 +176,28 @@ LRU 대비 같은 결과에 동시 열린 파티션이 30% 적고, 무엇보다 
 
 ### W2 — archiver: Kafka → Parquet → S3
 
-- Redpanda 를 `deploy/docker-compose.dev.yml` 에 추가
-- 컨슈머 → `PartitionedParquetWriter` → `S3ObjectStore`
-- W1 의 닫기 전략 적용
-- **오프셋 커밋 시점**이 정확성을 좌우한다. S3 업로드 성공 후 커밋해야 유실이 없고,
-  그러면 재시작 시 중복이 생긴다. 어느 쪽을 택할지가 이 주의 결정 사항
+> **범위가 커졌다.** 구현 전에 정확성 설계를 분석한 결과, 이건 배선 작업이 아니라
+> **상태 기계를 만드는 일**이었다. Phase 1 라이터의 성질과 Kafka 오프셋 모델이 근본적으로 어긋난다.
+> 결정은 [ADR-0006](adr/0006-archiver-durability.md) 에 정리했다.
 
-**Exit:** 1천만 건을 Kafka 로 흘려 S3 에 적재. 중간에 강제 종료 후 재시작해도 건수가 맞는다
+핵심은 이것이다 — **커밋은 프리픽스인데 이 파이프라인의 내구성 경계는 희소하다.**
+`sortWithinFile=true`(ADR-0004 필수)에서 행은 close 될 때까지 디스크가 아니라 힙에 있고,
+슬롯은 이벤트 시각으로 닫힌다. 그래서 "오프셋 N 이 S3 에 갔다"가 참이어도 N−1 은
+아직 힙에 있을 수 있다. W1 실측 규모로 **상시 약 440만 행(40%)이 미커밋**이다.
+
+착수 순서:
+
+1. **오프셋 저수위선 추적** — 슬롯별 `minOffset`. 커밋값은 min(열린 슬롯, 업로드 대기)
+2. **로컬 상태를 경로로** — `inflight/*.tmp` → `ready/*.parquet` (ATOMIC_MOVE).
+   지금은 업로드 후보가 인메모리라 재시작하면 무엇을 올릴지 모르고,
+   `putTree` 는 쓰는 중인 파일까지 올린다
+3. **라이터를 Kafka 파티션별로** — 워터마크가 라이터당 단일 필드라 랙 편차가 오염된다.
+   지연 도착 없이도 재개봉이 터진다
+4. **컨슈머 설정** — `enable.auto.commit=false` 강제, `auto.offset.reset=none`
+5. 그 위에 배선
+
+**Exit:** 1천만 건을 Kafka 로 흘려 S3 에 적재. 강제 종료 후 재시작해도 건수가 맞는다.
+추가 지표: 재생한 오프셋 수 / 재생 시간 / 재생 중 최대 힙 / 중복률.
 
 ### W3 — storage-cassandra (읽기 전용)
 
