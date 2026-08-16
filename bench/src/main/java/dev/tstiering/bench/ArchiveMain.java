@@ -194,7 +194,8 @@ public final class ArchiveMain {
         try (var s3 = S3ObjectStore.open(S3Settings.local(bucket))) {
             var objects = s3.list(prefix + "/");
             long bytes = objects.stream().mapToLong(S3ObjectStore.ObjectSummary::size).sum();
-            System.out.printf("S3 객체: %,d개 / %.1f MiB%n", objects.size(), bytes / 1048576.0);
+            System.out.printf("S3 객체: %,d개 / %,d bytes (%.1f MiB)%n",
+                    objects.size(), bytes, bytes / 1048576.0);
         }
 
         try (var conn = DuckDb.openLocal();
