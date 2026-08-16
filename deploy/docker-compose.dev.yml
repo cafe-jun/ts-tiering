@@ -35,6 +35,37 @@ services:
       retries: 20
       start_period: 10s
 
+  # Phase 2 의 텔레메트리 입력. Kafka API 호환이라 kafka-clients 를 그대로 쓴다.
+  # ZooKeeper 가 없어 컨테이너 하나로 끝나는 것이 Kafka 대신 고른 이유다.
+  # 필요할 때만 띄운다:  docker compose -f deploy/docker-compose.dev.yml up -d kafka
+  kafka:
+    image: redpandadata/redpanda:v26.1.16
+    container_name: ts-tiering-kafka
+    command:
+      - redpanda
+      - start
+      - --overprovisioned          # 로컬 개발용. CPU 를 독점하지 않는다
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://localhost:9092
+      # 보존을 14일로 명시한다. 기본값 7일은 ADR-0005 의 닫기 창(7일)과 정확히 같아서,
+      # 크래시 후 재생해야 할 구간이 로그 앞머리에서 잘려나간다 — 중복이 아니라 유실이 된다.
+      # **보존은 닫기 창의 함수다.** 창을 늘리면 이 값도 같이 늘려야 한다 (ADR-0006).
+      - --set
+      - redpanda.log_retention_ms=1209600000
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
   # 압축률의 "정직한 분모"를 재기 위한 것. Phase 1 은 회사 Cassandra 에 접속하지 않는다 —
   # ThingsBoard 의 ts_kv 스키마를 로컬에 그대로 세워 SSTable 크기를 실측한다.
   # 필요할 때만 띄운다:  docker compose -f deploy/docker-compose.dev.yml up -d cassandra

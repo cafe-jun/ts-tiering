@@ -106,6 +106,17 @@ public final class ParquetStats {
         return matched;
     }
 
+    /**
+     * 푸터의 키-값 메타데이터.
+     *
+     * <p>archiver 의 재시작 복구가 여기서 Kafka 오프셋 구간을 읽어 <b>"이 파일은 어차피
+     * 재생되니 버려도 된다"</b>를 판단한다 (ADR-0006 결정 8). 그 판단을 못 하면 복구는
+     * 올릴 수밖에 없고, 오프셋이 커밋되지 않았다면 그건 확정적 중복이다.
+     */
+    public static Map<String, String> footerMetadata(Path file) throws IOException {
+        return readFooter(new LocalInputFile(file)).getFileMetaData().getKeyValueMetaData();
+    }
+
     public static FileStat read(Path file) throws IOException {
         ParquetMetadata footer = readFooter(new LocalInputFile(file));
 

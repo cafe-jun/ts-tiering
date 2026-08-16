@@ -61,7 +61,7 @@ Phase 2 이후이고, 지금은 합성 데이터를 직접 Parquet 으로 써서
 | `storage-parquet` | Parquet 쓰기 (Hadoop 없이), 푸터 파싱 | 1 |
 | `storage-s3` | S3 I/O | 1 |
 | `bench` | 합성 데이터 생성 + 벤치마크 하네스 | 1 |
-| `archiver` | Kafka → Parquet → S3 (스트림) | 2 |
+| `archiver` | Kafka → Parquet → S3 (스트림) | 2 (진행 중) |
 | `query` | hot/cold 라우팅 + REST API | 2 |
 | `storage-cassandra` | Cassandra 읽기 전용 | 2 |
 | `backfiller` | Cassandra → S3 과거 데이터 이관 | 3 |
@@ -75,6 +75,7 @@ Phase 2 이후이고, 지금은 합성 데이터를 직접 Parquet 으로 써서
 - [ADR-0003 — 쿼리 엔진](docs/adr/0003-query-engine.md)
 - [ADR-0004 — 파티션 스킴](docs/adr/0004-partition-scheme.md)
 - [ADR-0005 — 파티션 닫기 전략](docs/adr/0005-partition-closing.md)
+- [ADR-0006 — archiver 의 내구성 계약](docs/adr/0006-archiver-durability.md)
 
 ## 벤치마크
 
@@ -89,6 +90,7 @@ Phase 2 이후이고, 지금은 합성 데이터를 직접 Parquet 으로 써서
 - [W5~W6 파티션 스킴](docs/benchmark/w5-partition-schemes.md) — 디바이스 파티션은 **바이트 26배 절감, 지연 43배 악화**
 - [W6 보강 — 매니페스트](docs/benchmark/w6-manifest-vs-glob.md) — 카탈로그가 프루닝까지 하면 순위가 뒤집힌다 (**182배**)
 - [P2 W1 파티션 닫기](docs/benchmark/p2w1-partition-closing.md) — 지연 5%면 파일이 **450 → 1,019,755개**가 된다
+- [P2 W2 archiver](docs/benchmark/p2w2-archiver.md) — 중단 후 재시작해도 **367,200건 그대로, 중복 0**
 
 ### 핵심 수치
 

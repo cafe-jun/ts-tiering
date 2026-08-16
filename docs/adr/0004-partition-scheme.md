@@ -24,10 +24,29 @@ cold 계층의 S3 객체 키를 어떤 규칙으로 만들 것인가. 계획서�
 ### 1. 기본 경로는 `tenant=/date=/key=` 로 한다
 
 ```
-s3://bucket/tenant=<uuid>/date=<YYYY-MM-DD>/key=<키>/part-N.parquet
+s3://bucket/tenant=<uuid>/date=<YYYY-MM-DD>/key=<키>/part-<closeEpochMillis>-<writerId>-<n>.parquet
 ```
 
 계획서의 스킴 B 에서 **`profile=` 을 뺀 것**이다. 이유는 아래 "기각" 참고.
+
+> **파일명 갱신 (2026-08-16, [ADR-0006](0006-archiver-durability.md) 결정 8).**
+> 원래 `part-N` 이었는데 두 번 늘어났다.
+>
+> - `<writerId>` — 인스턴스별 UUID 앞 8자. 재시작한 프로세스는 part 번호를 0부터 다시 세므로
+>   번호만으로는 이전 파일을 덮어쓴다. 로컬 단계에서 사라져 업로드 실패 로그조차 안 남는다
+> - `<closeEpochMillis>` — 닫힌 시각. **크래시 재시작 중복은 파일 단위로 깔끔하지 않아서**
+>   (재생본은 커밋 지점부터 시작하고 워터마크가 인메모리라 파일 경계도 어긋난다)
+>   콘텐츠 해시로 멱등 PUT 하는 방법도, 옛 파일을 지우는 방법도 안 통한다.
+>   남는 방법이 조회 시점에 순서를 정하는 것이고, 그러려면 순서가 이름에 있어야 한다
+>
+> ```sql
+> SELECT * FROM read_parquet('s3://.../**/*.parquet', hive_partitioning = 1, filename = 1)
+> QUALIFY row_number() OVER (PARTITION BY device_id, ts ORDER BY filename DESC) = 1
+> ```
+>
+> epoch millis 는 2286년까지 13자리라 사전순이 곧 수치순이다. 같은 밀리초에 닫힌 두 파일은
+> `writerId` 로 갈리는데 임의지만 결정론적이다. 같은 값이 파일 푸터
+> (`ts-tiering.close_epoch`)에도 들어가 compaction 과 조회가 같은 순서를 본다.
 
 | | Q1 (디바이스 지정) | Q3 (전체 조회) | 나열 |
 |---|---|---|---|

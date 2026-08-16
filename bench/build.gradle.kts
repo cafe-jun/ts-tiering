@@ -6,6 +6,7 @@ dependencies {
     implementation(project(":core"))
     implementation(project(":storage-parquet"))
     implementation(project(":storage-s3"))
+    implementation(project(":archiver"))
     implementation("com.fasterxml.jackson.core:jackson-core:2.18.2")
 
     // Cassandra 는 "정직한 분모"를 재기 위한 측정 대상일 뿐이다 (W3).
@@ -43,6 +44,16 @@ tasks.register<JavaExec>("ingest") {
 }
 
 // docker compose -f deploy/docker-compose.dev.yml up -d
+// ./gradlew :bench:archive --args="--mode=produce --days=1"
+tasks.register<JavaExec>("archive") {
+    group = "benchmark"
+    description = "Kafka 로 흘리고 archiver 로 S3 까지 보낸다 (W2)"
+    mainClass.set("dev.tstiering.bench.ArchiveMain")
+    classpath = sourceSets["main"].runtimeClasspath
+    workingDir = rootProject.projectDir
+    maxHeapSize = "4g"
+}
+
 // ./gradlew :bench:query --args="--iterations=20"
 tasks.register<JavaExec>("query") {
     group = "benchmark"

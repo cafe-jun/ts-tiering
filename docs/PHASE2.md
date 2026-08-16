@@ -16,7 +16,7 @@ Phase 1 의 산출물이 측정 결과표였다면, Phase 2 의 산출물은 **�
 
 | | 결정 | 근거 |
 |---|---|---|
-| 객체 키 | `tenant=/date=/key=/part-N.parquet` | [ADR-0004](adr/0004-partition-scheme.md) |
+| 객체 키 | `tenant=/date=/key=/part-<closeEpoch>-<writerId>-<n>.parquet` | [ADR-0004](adr/0004-partition-scheme.md) |
 | 값 표현 | PER_KEY_TYPED + ZSTD | [ADR-0002](adr/0002-value-layout.md) |
 | 파일 내 정렬 | `(device_id, ts)` + Parquet v2 | ADR-0004 |
 | 쿼리 엔진 | DuckDB | [ADR-0003](adr/0003-query-engine.md) |
@@ -79,13 +79,15 @@ archiver 재시작(배포·OOM·컨테이너 재기동) 때마다 이전 part �
 Kafka 오프셋은 커밋됐고 hot 은 TTL 로 지워졌는데 cold 에는 없는 상태가 만들어진다.
 
 **수정 (2026-08-15):** 파일명이 `part-<writerId>-<seq>.parquet` 이 됐다.
+(2026-08-16 에 `part-<closeEpoch>-<writerId>-<seq>.parquet` 으로 한 번 더 늘었다 — ADR-0006 결정 8.)
 `writerId` 는 인스턴스별 UUID 앞 8자라 재시작하면 다른 값이 나온다.
 `ParquetDatapointWriter` 의 `deleteIfExists` 도 제거해서, 같은 경로가 이미 있으면
 `ParquetWriter` 의 기본 모드(CREATE)가 예외를 던진다 — 조용히 지우는 대신 시끄럽게 실패한다.
 회귀 테스트: `PartitionedParquetWriterTest#secondWriterInstanceDoesNotOverwriteFirstOnesFiles`.
 
-**남은 것:** 임시 경로에 쓰고 close 성공 후 atomic move 하는 패턴.
-미완성 파일이 업로드 후보에 섞이는 문제는 아직 열려 있다 (W2 에서).
+**수정 (2026-08-16):** 임시 경로에 쓰고 close 성공 후 atomic move 하는 패턴을 붙였다.
+`inflight/` 에 쓰고 닫히면 `ready/` 로 `ATOMIC_MOVE` 한다 (`LocalSpool`, ADR-0006 결정 7).
+미완성 파일이 업로드 후보에 섞이는 경로가 닫혔다.
 
 ### 2. 디바이스가 보내는 `key` 가 검증 없이 객체 경로가 된다 ✅ 수정됨
 
@@ -142,11 +144,15 @@ Phase 1 과 같은 이유로 명시한다.
 
 ## 종료 조건
 
-1. Kafka(Redpanda)에 흘린 데이터가 S3 에 Parquet 으로 쌓인다
+1. ✅ **Kafka(Redpanda)에 흘린 데이터가 S3 에 Parquet 으로 쌓인다** —
+   1천만 건(10,281,600) 통과, 파일 1,680개 = 이상값 (재개봉 0)
 2. ✅ **지연 도착이 있어도 파일 수가 통제된다** — [측정표](benchmark/p2w1-partition-closing.md)
 3. hot/cold 경계를 걸치는 시간 범위 질의가 **중복 없이** 정확한 결과를 낸다
-4. archiver 를 죽였다 살려도 데이터가 유실·중복되지 않는다 (건수 대조로 확인)
-5. ADR 2건 추가 (파티션 닫기 전략 ✅ [ADR-0005](adr/0005-partition-closing.md) / hot-cold 경계 처리)
+4. ✅ **archiver 를 죽였다 살려도 데이터가 유실·중복되지 않는다** —
+   정상 종료·`kill -9`·리밸런스 [전부 확인](benchmark/p2w2-archiver.md).
+   **유실은 어느 경로에서도 0.** 중복은 `kill -9` 에서 1.96% 남고 조회 dedup 이 해소한다
+5. ADR 3건 추가 (파티션 닫기 ✅ [ADR-0005](adr/0005-partition-closing.md) /
+   archiver 내구성 ✅ [ADR-0006](adr/0006-archiver-durability.md) / hot-cold 경계 처리)
 
 ## 주차별 계획
 
@@ -175,13 +181,63 @@ LRU 대비 같은 결과에 동시 열린 파티션이 30% 적고, 무엇보다 
 
 ### W2 — archiver: Kafka → Parquet → S3
 
-- Redpanda 를 `deploy/docker-compose.dev.yml` 에 추가
-- 컨슈머 → `PartitionedParquetWriter` → `S3ObjectStore`
-- W1 의 닫기 전략 적용
-- **오프셋 커밋 시점**이 정확성을 좌우한다. S3 업로드 성공 후 커밋해야 유실이 없고,
-  그러면 재시작 시 중복이 생긴다. 어느 쪽을 택할지가 이 주의 결정 사항
+> **범위가 커졌다.** 구현 전에 정확성 설계를 분석한 결과, 이건 배선 작업이 아니라
+> **상태 기계를 만드는 일**이었다. Phase 1 라이터의 성질과 Kafka 오프셋 모델이 근본적으로 어긋난다.
+> 결정은 [ADR-0006](adr/0006-archiver-durability.md) 에 정리했다.
 
-**Exit:** 1천만 건을 Kafka 로 흘려 S3 에 적재. 중간에 강제 종료 후 재시작해도 건수가 맞는다
+핵심은 이것이다 — **커밋은 프리픽스인데 이 파이프라인의 내구성 경계는 희소하다.**
+`sortWithinFile=true`(ADR-0004 필수)에서 행은 close 될 때까지 디스크가 아니라 힙에 있고,
+슬롯은 이벤트 시각으로 닫힌다. 그래서 "오프셋 N 이 S3 에 갔다"가 참이어도 N−1 은
+아직 힙에 있을 수 있다. W1 실측 규모로 **상시 약 440만 행(40%)이 미커밋**이다.
+
+착수 순서:
+
+1. **오프셋 저수위선 추적** — 슬롯별 `minOffset`. 커밋값은 min(열린 슬롯, 업로드 대기)
+2. **로컬 상태를 경로로** — `inflight/*.tmp` → `ready/*.parquet` (ATOMIC_MOVE).
+   지금은 업로드 후보가 인메모리라 재시작하면 무엇을 올릴지 모르고,
+   `putTree` 는 쓰는 중인 파일까지 올린다
+3. **라이터를 Kafka 파티션별로** — 워터마크가 라이터당 단일 필드라 랙 편차가 오염된다.
+   지연 도착 없이도 재개봉이 터진다
+4. **컨슈머 설정** — `enable.auto.commit=false` 강제, `auto.offset.reset=none`
+5. 그 위에 배선
+
+**Exit:** ✅ 완료 (2026-08-16) — [측정](benchmark/p2w2-archiver.md)
+
+367,200건으로 종단 검증 완료. 20만 건에서 중단 후 재시작해도
+**S3 총 행 수 367,200 = 주입 건수, 고유 행 수 367,200 (중복 0), Kafka 랙 0.**
+최대 미커밋 100,800 오프셋 — ADR-0006 이 말한 재생 구간의 크기가 실측으로 나왔다.
+깨진 메시지 500건을 섞어도 정확히 갈린다 (기록 5,000 / 파싱 실패 500).
+
+`kill -9` 도 쟀다. **유실은 어느 조건에서도 0**이고, 중복은 두 축으로 통제된다.
+
+| | 중복 | S3 객체 |
+|---|---|---|
+| 결정 8 전, 상한 2,000,000 | 367,200 (100%) | 120개 / 1.3 MiB |
+| 결정 8 전, 상한 50,000 | 0 | 135개 / 983 KiB |
+| **결정 8 후, 상한 2,000,000** | **7,200 (1.96%)** | **61개 / 0.7 MiB** |
+
+결정 8(닫힌 시각 파일명 + 푸터 오프셋 좌표)을 구현하니 설정을 바꾸지 않고 중복이 100% → 1.96%
+가 됐다. 상한을 낮춰 얻는 0% 와 달리 파일 수 대가가 없다. 남은 1.96% 는 **죽기 직전 S3 로
+이미 올라갔지만 커밋 전인 파일 하나**로, 복구가 손댈 수 없는 다른 창이다 — 조회 쪽 dedup
+(`ORDER BY filename DESC`)이 해소하는 것까지 확인했다.
+
+리밸런스도 쟀다. A 가 읽는 중에 B 를 같은 그룹에 넣으면 EAGER 로 4개를 전부 회수당하는데,
+**A 기록 + B 기록 = 주입 건수 = S3 총 행 수**로 유실도 중복도 없다.
+회수는 937 ms(파일 120개) — `max.poll.interval.ms` 대비 320배 여유지만
+그 값은 같은 머신의 MinIO 라서다. 파일은 600 → 660 (+10%)로 늘었다.
+
+깨진 메시지·못 쓰는 키도 실제로 흘려봤다: 소비 5,500 = 기록 5,000 + 파싱 실패 200 + 거부 300, 랙 0.
+
+**1천만 건 규모 통과.** 10,281,600건 / 55.2s(186,261 행/s) / 파일 1,680개 = 이상값,
+유실 0 · 중복 0 · 랙 0.
+
+여기서 계획에 없던 것이 나왔다 — **Kafka 파티션 수가 저장 비용을 곱한다.**
+같은 데이터 형태인데 행당 1.033 B(Phase 1) → 1.879 B(W2)로 82% 커졌다.
+파티션별 라이터(결정 5)가 `(tenant, date, key)` 하나를 4개 파일로 쪼개고,
+파일당 고정비 6.9 KiB 가 그만큼 여러 번 붙는다. 저장 바이트의 60%가 고정비다.
+**Phase 3 의 compaction 은 결정 5의 대가를 되돌리는 일이다.**
+
+남은 것: dedup 을 켠 상태의 질의 비용(W4 재측정).
 
 ### W3 — storage-cassandra (읽기 전용)
 

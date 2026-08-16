@@ -9,6 +9,7 @@ import org.apache.parquet.io.api.RecordConsumer;
 import org.apache.parquet.schema.MessageType;
 
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Datapoint 를 Group 객체 생성 없이 바로 RecordConsumer 에 흘려보낸다.
@@ -23,12 +24,20 @@ final class DatapointWriteSupport extends WriteSupport<Datapoint> {
     /** PER_KEY_TYPED 일 때만 쓰인다. 파일이 담당하는 키의 타입. */
     private final TsValue.Kind fixedKind;
 
+    /**
+     * 푸터에 넣을 추가 메타데이터. <b>close 시점에 평가된다</b> —
+     * 오프셋 구간처럼 파일을 다 쓰고 나서야 확정되는 값이 있기 때문이다 (ADR-0006 결정 8).
+     */
+    private final Supplier<Map<String, String>> footerMetadata;
+
     private RecordConsumer consumer;
 
-    DatapointWriteSupport(MessageType schema, ValueLayout layout, TsValue.Kind fixedKind) {
+    DatapointWriteSupport(MessageType schema, ValueLayout layout, TsValue.Kind fixedKind,
+                          Supplier<Map<String, String>> footerMetadata) {
         this.schema = schema;
         this.layout = layout;
         this.fixedKind = fixedKind;
+        this.footerMetadata = footerMetadata;
     }
 
     /**
@@ -45,6 +54,19 @@ final class DatapointWriteSupport extends WriteSupport<Datapoint> {
     @Override
     public WriteContext init(ParquetConfiguration configuration) {
         return new WriteContext(schema, Map.of("ts-tiering.layout", layout.name()));
+    }
+
+    /**
+     * {@code InternalParquetRecordWriter.close()} 가 푸터를 쓰기 직전에 부른다.
+     * 여기서 돌려준 값이 {@link #init} 의 메타데이터와 합쳐진다.
+     *
+     * <p>init 이 아니라 여기여야 하는 이유는 <b>시점</b>이다. archiver 가 넣어야 할
+     * Kafka 오프셋 구간은 파일을 다 쓴 뒤에야 확정된다.
+     */
+    @Override
+    public FinalizedWriteContext finalizeWrite() {
+        Map<String, String> extra = footerMetadata.get();
+        return extra.isEmpty() ? super.finalizeWrite() : new FinalizedWriteContext(extra);
     }
 
     @Override

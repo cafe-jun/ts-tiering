@@ -189,6 +189,26 @@ public final class S3ObjectStore implements Closeable {
         return out;
     }
 
+    /**
+     * 프리픽스 아래 전체를 지운다. <b>벤치 하네스용</b>이다 — 실행 사이에 프리픽스를 비우지 않으면
+     * 이전 실행분이 다음 실행의 건수 대조에 섞여 <b>있지도 않은 중복으로 보인다</b>
+     * (실제로 리밸런스 측정에서 한 번 그랬다).
+     *
+     * @return 지운 객체 수
+     */
+    public int deletePrefix(String prefix) {
+        List<ObjectSummary> objects = list(prefix);
+        // DeleteObjects 는 요청당 1000개가 상한이다.
+        for (int from = 0; from < objects.size(); from += 1000) {
+            var batch = objects.subList(from, Math.min(from + 1000, objects.size())).stream()
+                    .map(o -> software.amazon.awssdk.services.s3.model.ObjectIdentifier.builder()
+                            .key(o.key()).build())
+                    .toList();
+            client.deleteObjects(b -> b.bucket(settings.bucket()).delete(d -> d.objects(batch)));
+        }
+        return objects.size();
+    }
+
     // --- 보조 ------------------------------------------------------------------
 
     private void abortQuietly(String key, String uploadId, Throwable cause) {
