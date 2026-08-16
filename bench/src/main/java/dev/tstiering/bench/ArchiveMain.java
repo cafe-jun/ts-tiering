@@ -43,8 +43,9 @@ public final class ArchiveMain {
             case "produce" -> produce(opts);
             case "archive" -> archive(opts);
             case "verify" -> verify(opts);
+            case "clear" -> clear(opts);
             default -> throw new IllegalArgumentException(
-                    "알 수 없는 모드: " + mode + " (produce / archive / verify)");
+                    "알 수 없는 모드: " + mode + " (produce / archive / verify / clear)");
         }
     }
 
@@ -71,11 +72,18 @@ public final class ArchiveMain {
         // 오염 주입: archiver 가 정말 세고 넘어가는지 확인하려면 실제로 흘려봐야 한다.
         long poison = opts.number("poison", 0);
 
+        // 파싱은 되는데 경로에 넣을 수 없는 키. poison 과 다른 경로(rejected)로 갈려야 한다.
+        long badKeys = opts.number("bad-key", 0);
+
         long startedAt = System.nanoTime();
         try (var producer = new KafkaProducer<byte[], byte[]>(props)) {
             for (long i = 0; i < poison; i++) {
                 producer.send(new ProducerRecord<>(topic, ("poison-" + i).getBytes(),
                         ("{\"broken\":" + i + "}").getBytes()));
+            }
+            for (long i = 0; i < badKeys; i++) {
+                producer.send(new ProducerRecord<>(topic, ("badkey-" + i).getBytes(),
+                        badKeyMessage(i)));
             }
             generator.generate(count, late, dp ->
                     // 같은 디바이스는 같은 파티션으로 — 순서가 뒤집히면 워터마크가 더 흔들린다.
@@ -83,8 +91,30 @@ public final class ArchiveMain {
                             dp.entityId().toString().getBytes(), TelemetryCodec.encode(dp))));
         }
         if (poison > 0) System.out.printf("  (깨진 메시지 %,d건 함께 주입)%n", poison);
+        if (badKeys > 0) System.out.printf("  (경로에 못 넣는 키 %,d건 함께 주입)%n", badKeys);
         double seconds = (System.nanoTime() - startedAt) / 1_000_000_000.0;
         System.out.printf("완료: %,d건 %.1fs (%,.0f msg/s)%n", count, seconds, count / seconds);
+    }
+
+    /**
+     * 파싱은 통과하지만 <b>객체 경로에 넣을 수 없는</b> 키.
+     *
+     * <p>깨진 메시지({@code --poison})와 갈라야 한다 — 그쪽은 디코딩에서 죽고 이쪽은
+     * {@code PartitionValues} 검증에서 죽는다. 둘이 같은 카운터로 세지면
+     * 디바이스가 보낸 키 하나가 경로 탈출을 시도한 것을 못 본다.
+     */
+    private static byte[] badKeyMessage(long i) {
+        String key = switch ((int) (i % 4)) {
+            case 0 -> "../../etc/passwd";
+            case 1 -> "temp/erature";
+            case 2 -> "..";
+            default -> "temp erature";   // 공백
+        };
+        return ("{\"tenantId\":\"00000000-007e-4a47-0000-000000000000\","
+                + "\"profile\":\"industrial-sensor\","
+                + "\"deviceId\":\"00000000-00de-71ce-0000-000000000000\","
+                + "\"key\":\"" + key + "\",\"ts\":1767225600000,"
+                + "\"type\":\"DOUBLE\",\"value\":20.3}").getBytes();
     }
 
     // --- 적재 -----------------------------------------------------------------
@@ -129,6 +159,8 @@ public final class ArchiveMain {
         System.out.printf("복구 올림   : %,d  /  복구 버림 : %,d  ← 버린 만큼 중복이 안 생겼다%n",
                 stats.recoveredForUpload(), stats.discardedOnRecovery());
         System.out.printf("최대 미커밋 : %,d 오프셋  ← 재생 구간의 크기%n", stats.maxUncommittedSpan());
+        System.out.printf("최대 회수   : %,d ms  ← max.poll.interval.ms(300,000) 대비%n",
+                stats.maxRevokeMillis());
         System.out.printf("소요        : %.1fs%n", seconds);
 
         var broken = spool.verifyReady();
@@ -137,6 +169,18 @@ public final class ArchiveMain {
         if (!broken.isEmpty()) {
             System.out.println("  ⚠️ 푸터가 깨진 파일이 있다 — 불변식 1 위반");
             broken.forEach(p -> System.out.println("     " + p));
+        }
+    }
+
+    /**
+     * 프리픽스를 비운다. <b>실행 사이에 이걸 안 하면 이전 실행분이 건수 대조에 섞인다</b> —
+     * 리밸런스 측정에서 실제로 3일치 잔여분이 10일치 결과에 30% 중복으로 보였다.
+     */
+    private static void clear(BenchArgs opts) {
+        String bucket = opts.string("bucket", "ts-tiering-cold");
+        String prefix = opts.string("s3-prefix", "archiver");
+        try (var s3 = S3ObjectStore.open(S3Settings.local(bucket))) {
+            System.out.printf("삭제: %s/ 아래 %,d개%n", prefix, s3.deletePrefix(prefix + "/"));
         }
     }
 

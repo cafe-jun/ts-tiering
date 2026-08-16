@@ -56,7 +56,8 @@ public final class Archiver implements Closeable {
      */
     public record Stats(long consumed, long written, long undecodable, long rejected,
                         long filesUploaded, long committed, long maxUncommittedSpan,
-                        long recoveredForUpload, long discardedOnRecovery) {
+                        long recoveredForUpload, long discardedOnRecovery,
+                        long maxRevokeMillis) {
     }
 
     /** 푸터에 박는 오프셋 좌표. 재시작 복구가 이 값으로 재생 여부를 판단한다. */
@@ -91,6 +92,9 @@ public final class Archiver implements Closeable {
     private long maxUncommittedSpan;
     private long recoveredForUpload;
     private long discardedOnRecovery;
+
+    /** 가장 오래 걸린 회수. {@code max.poll.interval.ms} 대비 얼마나 여유가 있는지의 지표다. */
+    private long maxRevokeMillis;
 
     /** 빈 poll 이 이만큼 이어지면 더 올 것이 없다고 본다. poll 타임아웃 1초 기준 5초. */
     public static final int DEFAULT_IDLE_POLLS_BEFORE_DRAIN = 5;
@@ -435,7 +439,7 @@ public final class Archiver implements Closeable {
     public Stats stats() {
         return new Stats(consumed, written, undecodable, rejected,
                 filesUploaded, committed, maxUncommittedSpan,
-                recoveredForUpload, discardedOnRecovery);
+                recoveredForUpload, discardedOnRecovery, maxRevokeMillis);
     }
 
     @Override
@@ -455,6 +459,10 @@ public final class Archiver implements Closeable {
 
         @Override
         public void onPartitionsRevoked(Collection<TopicPartition> revoked) {
+            // 이 블록이 max.poll.interval.ms 안에 끝나야 한다. 넘으면 그룹에서 쫓겨나고,
+            // 이미 커밋한 뒤라면 그 사이 새 소유자가 같은 구간을 다시 읽는다.
+            long startedAt = System.nanoTime();
+            long filesBefore = filesUploaded;
             try {
                 for (TopicPartition tp : revoked) {
                     PartitionedParquetWriter writer = writers.remove(tp);
@@ -466,6 +474,10 @@ public final class Archiver implements Closeable {
             } catch (IOException e) {
                 throw new UncheckedIOException("리밸런스 중 플러시 실패", e);
             }
+            long millis = (System.nanoTime() - startedAt) / 1_000_000;
+            maxRevokeMillis = Math.max(maxRevokeMillis, millis);
+            System.out.printf("  회수 %d개 파티션: %,d ms (파일 %,d개 올림)%n",
+                    revoked.size(), millis, filesUploaded - filesBefore);
         }
 
         /**
