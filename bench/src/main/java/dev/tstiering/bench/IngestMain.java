@@ -82,7 +82,8 @@ public final class IngestMain {
                 (int) rowGroupBytes,
                 sort,
                 writerVersion,
-                closePolicy);
+                closePolicy,
+                PartitionedParquetWriter.ClosedFileListener.NONE);
 
         // 스킴/granularity/정렬 조합마다 프리픽스를 갈라야 매트릭스를 한 버킷에 담을 수 있다.
         String s3Prefix = opts.string("s3-prefix", spec.name() + (sort ? "-sorted" : ""));

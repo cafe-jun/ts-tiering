@@ -63,6 +63,21 @@ public final class PartitionedParquetWriter implements Closeable {
     private static final int SIZE_CHECK_INTERVAL = 8192;
 
     /**
+     * 슬롯이 닫혀 파일이 완결된 순간. <b>이 시점이 archiver 의 두 가지 일이 걸리는 자리다</b> —
+     * 오프셋 소유권을 슬롯에서 파일로 옮기고(ADR-0006 결정 1), 파일을 업로드 후보로
+     * 승격한다(결정 7). 둘 다 "닫혔다"를 알아야만 할 수 있다.
+     *
+     * <p>여기서 던지면 {@code closeFile} 의 실패 경로를 타므로 핸들은 이미 닫힌 뒤다.
+     */
+    @FunctionalInterface
+    public interface ClosedFileListener {
+        void onClosed(String slotDir, Path file, long rows) throws IOException;
+
+        ClosedFileListener NONE = (dir, file, rows) -> {
+        };
+    }
+
+    /**
      * @param sortWithinFile 파일 안에서 {@code (device_id, ts)} 로 정렬해서 쓴다.
      *                       켜면 파티션의 행을 전부 모았다가 닫을 때 한꺼번에 쓰므로
      *                       <b>크기 기반 롤링이 동작하지 않는다</b> (아래 참고).
@@ -76,7 +91,8 @@ public final class PartitionedParquetWriter implements Closeable {
             int rowGroupSize,
             boolean sortWithinFile,
             org.apache.parquet.column.ParquetProperties.WriterVersion writerVersion,
-            ClosePolicy closePolicy
+            ClosePolicy closePolicy,
+            ClosedFileListener closedFileListener
     ) {
         public Config {
             if (targetFileBytes <= 0) throw new IllegalArgumentException("targetFileBytes must be > 0");
@@ -87,28 +103,33 @@ public final class PartitionedParquetWriter implements Closeable {
         public static Config of(Path root, PartitionSpec spec, CompressionCodecName codec) {
             return new Config(root, spec, codec,
                     DEFAULT_TARGET_FILE_BYTES, DEFAULT_MAX_OPEN_WRITERS, DEFAULT_ROW_GROUP_SIZE, false,
-                    DEFAULT_WRITER_VERSION, ClosePolicy.LRU_ONLY);
+                    DEFAULT_WRITER_VERSION, ClosePolicy.LRU_ONLY, ClosedFileListener.NONE);
         }
 
         public Config withTargetFileBytes(long bytes) {
-            return new Config(root, spec, codec, bytes, maxOpenWriters, rowGroupSize, sortWithinFile, writerVersion, closePolicy);
+            return new Config(root, spec, codec, bytes, maxOpenWriters, rowGroupSize, sortWithinFile, writerVersion, closePolicy, closedFileListener);
         }
 
         public Config withMaxOpenWriters(int max) {
-            return new Config(root, spec, codec, targetFileBytes, max, rowGroupSize, sortWithinFile, writerVersion, closePolicy);
+            return new Config(root, spec, codec, targetFileBytes, max, rowGroupSize, sortWithinFile, writerVersion, closePolicy, closedFileListener);
         }
 
         public Config withRowGroupSize(int size) {
-            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, size, sortWithinFile, writerVersion, closePolicy);
+            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, size, sortWithinFile, writerVersion, closePolicy, closedFileListener);
         }
 
         public Config withClosePolicy(ClosePolicy policy) {
             return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, rowGroupSize,
-                    sortWithinFile, writerVersion, policy);
+                    sortWithinFile, writerVersion, policy, closedFileListener);
+        }
+
+        public Config withClosedFileListener(ClosedFileListener listener) {
+            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, rowGroupSize,
+                    sortWithinFile, writerVersion, closePolicy, listener);
         }
 
         public Config withSortWithinFile(boolean sort) {
-            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, rowGroupSize, sort, writerVersion, closePolicy);
+            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, rowGroupSize, sort, writerVersion, closePolicy, closedFileListener);
         }
     }
 
@@ -216,7 +237,12 @@ public final class PartitionedParquetWriter implements Closeable {
         this.config = config;
     }
 
-    public void write(Datapoint dp) throws IOException {
+    /**
+     * @return 이 레코드가 들어간 슬롯의 키(파티션 경로). archiver 가 오프셋을 이 키에 붙이고,
+     *         {@link ClosedFileListener} 가 같은 키로 소유권 이전을 알린다.
+     *         정책이 이 레코드를 버렸으면 {@code null}
+     */
+    public String write(Datapoint dp) throws IOException {
         if (closed) throw new IllegalStateException("이미 닫힌 라이터다");
 
         ClosePolicy policy = config.closePolicy();
@@ -225,7 +251,7 @@ public final class PartitionedParquetWriter implements Closeable {
             watermark = Math.max(watermark, dp.ts());
             if (policy.dropLate() && dp.ts() < watermark - policy.lagMillis()) {
                 dropped++;
-                return;
+                return null;
             }
         }
 
@@ -265,7 +291,7 @@ public final class PartitionedParquetWriter implements Closeable {
         if (slot.buffer != null) {
             // 정렬 모드에서는 닫을 때까지 모은다. 크기를 알 수 없으므로 롤링은 걸 수 없다.
             slot.buffer.add(dp);
-            return;
+            return dir;
         }
 
         slot.writer.write(dp);
@@ -276,6 +302,7 @@ public final class PartitionedParquetWriter implements Closeable {
             openFile(slot);
             rollovers++;
         }
+        return dir;
     }
 
     public Stats stats() {
@@ -367,6 +394,7 @@ public final class PartitionedParquetWriter implements Closeable {
             return;   // 이전 실패로 비어 있는 슬롯. 닫을 것이 없다
         }
         slot.writer = null;
+        long rowsInFile = slot.rowsInFile;
 
         try {
             if (slot.buffer != null) {
@@ -378,6 +406,7 @@ public final class PartitionedParquetWriter implements Closeable {
             }
             writer.close();
             closedFiles.add(writer.path());
+            config.closedFileListener().onClosed(slot.dir, writer.path(), rowsInFile);
         } catch (IOException | RuntimeException e) {
             try {
                 writer.close();
