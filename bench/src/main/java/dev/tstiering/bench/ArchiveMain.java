@@ -68,13 +68,21 @@ public final class ArchiveMain {
         // 유실이 있으면 건수 대조가 무의미해진다.
         props.put(ProducerConfig.ACKS_CONFIG, "all");
 
+        // 오염 주입: archiver 가 정말 세고 넘어가는지 확인하려면 실제로 흘려봐야 한다.
+        long poison = opts.number("poison", 0);
+
         long startedAt = System.nanoTime();
         try (var producer = new KafkaProducer<byte[], byte[]>(props)) {
+            for (long i = 0; i < poison; i++) {
+                producer.send(new ProducerRecord<>(topic, ("poison-" + i).getBytes(),
+                        ("{\"broken\":" + i + "}").getBytes()));
+            }
             generator.generate(count, late, dp ->
                     // 같은 디바이스는 같은 파티션으로 — 순서가 뒤집히면 워터마크가 더 흔들린다.
                     producer.send(new ProducerRecord<>(topic,
                             dp.entityId().toString().getBytes(), TelemetryCodec.encode(dp))));
         }
+        if (poison > 0) System.out.printf("  (깨진 메시지 %,d건 함께 주입)%n", poison);
         double seconds = (System.nanoTime() - startedAt) / 1_000_000_000.0;
         System.out.printf("완료: %,d건 %.1fs (%,.0f msg/s)%n", count, seconds, count / seconds);
     }
