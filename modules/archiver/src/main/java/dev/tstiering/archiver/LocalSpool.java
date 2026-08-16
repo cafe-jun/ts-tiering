@@ -103,6 +103,14 @@ public final class LocalSpool {
         }
     }
 
+    /**
+     * 올리지 않고 버린다. <b>그 파일의 오프셋이 재생된다는 것을 확인한 뒤에만 쓸 것</b>
+     * (ADR-0006 결정 8). 확인 없이 버리면 유실이다.
+     */
+    public void discard(Path readyFile) throws IOException {
+        released(readyFile);
+    }
+
     /** 업로드가 끝난 파일. 지워야 "ready 에 있다 = 아직 안 올라감"이 성립한다. */
     public void released(Path readyFile) throws IOException {
         Files.deleteIfExists(readyFile);

@@ -20,7 +20,7 @@ import java.util.Map;
  * Datapoint 를 파티션 경로 × 텔레메트리 키로 갈라 Parquet 파일 트리로 쓴다.
  *
  * <pre>
- * &lt;root&gt;/&lt;PartitionSpec 경로&gt;/key=&lt;키&gt;/part-&lt;writerId&gt;-&lt;n&gt;.parquet
+ * &lt;root&gt;/&lt;PartitionSpec 경로&gt;/key=&lt;키&gt;/part-&lt;closeEpochMillis&gt;-&lt;writerId&gt;-&lt;n&gt;.parquet
  * </pre>
  *
  * <p>{@link PerKeyParquetWriter} 는 키당 파일 하나를 끝까지 열어두는 W2 벤치마크용이다.
@@ -78,6 +78,20 @@ public final class PartitionedParquetWriter implements Closeable {
     }
 
     /**
+     * 파일 푸터에 넣을 추가 메타데이터. <b>슬롯이 닫히는 순간에 불린다</b> —
+     * archiver 의 Kafka 오프셋 구간처럼 파일을 다 쓴 뒤에야 확정되는 값을 위한 것이다.
+     *
+     * <p>여기 담긴 값으로 재시작 복구가 "이 파일은 어차피 재생되니 버려도 된다"를
+     * 판단한다 (ADR-0006 결정 8). 그게 없으면 복구는 올릴 수밖에 없고, 그건 확정적 중복이다.
+     */
+    @FunctionalInterface
+    public interface FileMetadataSupplier {
+        Map<String, String> metadataFor(String slotDir);
+
+        FileMetadataSupplier NONE = dir -> Map.of();
+    }
+
+    /**
      * @param sortWithinFile 파일 안에서 {@code (device_id, ts)} 로 정렬해서 쓴다.
      *                       켜면 파티션의 행을 전부 모았다가 닫을 때 한꺼번에 쓰므로
      *                       <b>크기 기반 롤링이 동작하지 않는다</b> (아래 참고).
@@ -92,7 +106,8 @@ public final class PartitionedParquetWriter implements Closeable {
             boolean sortWithinFile,
             org.apache.parquet.column.ParquetProperties.WriterVersion writerVersion,
             ClosePolicy closePolicy,
-            ClosedFileListener closedFileListener
+            ClosedFileListener closedFileListener,
+            FileMetadataSupplier fileMetadata
     ) {
         public Config {
             if (targetFileBytes <= 0) throw new IllegalArgumentException("targetFileBytes must be > 0");
@@ -103,33 +118,43 @@ public final class PartitionedParquetWriter implements Closeable {
         public static Config of(Path root, PartitionSpec spec, CompressionCodecName codec) {
             return new Config(root, spec, codec,
                     DEFAULT_TARGET_FILE_BYTES, DEFAULT_MAX_OPEN_WRITERS, DEFAULT_ROW_GROUP_SIZE, false,
-                    DEFAULT_WRITER_VERSION, ClosePolicy.LRU_ONLY, ClosedFileListener.NONE);
+                    DEFAULT_WRITER_VERSION, ClosePolicy.LRU_ONLY, ClosedFileListener.NONE,
+                    FileMetadataSupplier.NONE);
         }
 
         public Config withTargetFileBytes(long bytes) {
-            return new Config(root, spec, codec, bytes, maxOpenWriters, rowGroupSize, sortWithinFile, writerVersion, closePolicy, closedFileListener);
+            return new Config(root, spec, codec, bytes, maxOpenWriters, rowGroupSize, sortWithinFile,
+                    writerVersion, closePolicy, closedFileListener, fileMetadata);
         }
 
         public Config withMaxOpenWriters(int max) {
-            return new Config(root, spec, codec, targetFileBytes, max, rowGroupSize, sortWithinFile, writerVersion, closePolicy, closedFileListener);
+            return new Config(root, spec, codec, targetFileBytes, max, rowGroupSize, sortWithinFile,
+                    writerVersion, closePolicy, closedFileListener, fileMetadata);
         }
 
         public Config withRowGroupSize(int size) {
-            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, size, sortWithinFile, writerVersion, closePolicy, closedFileListener);
+            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, size, sortWithinFile,
+                    writerVersion, closePolicy, closedFileListener, fileMetadata);
         }
 
         public Config withClosePolicy(ClosePolicy policy) {
             return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, rowGroupSize,
-                    sortWithinFile, writerVersion, policy, closedFileListener);
+                    sortWithinFile, writerVersion, policy, closedFileListener, fileMetadata);
         }
 
         public Config withClosedFileListener(ClosedFileListener listener) {
             return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, rowGroupSize,
-                    sortWithinFile, writerVersion, closePolicy, listener);
+                    sortWithinFile, writerVersion, closePolicy, listener, fileMetadata);
+        }
+
+        public Config withFileMetadata(FileMetadataSupplier supplier) {
+            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, rowGroupSize,
+                    sortWithinFile, writerVersion, closePolicy, closedFileListener, supplier);
         }
 
         public Config withSortWithinFile(boolean sort) {
-            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, rowGroupSize, sort, writerVersion, closePolicy, closedFileListener);
+            return new Config(root, spec, codec, targetFileBytes, maxOpenWriters, rowGroupSize, sort,
+                    writerVersion, closePolicy, closedFileListener, fileMetadata);
         }
     }
 
@@ -184,6 +209,12 @@ public final class PartitionedParquetWriter implements Closeable {
 
         /** 이 파티션에서 마지막으로 본 이벤트 시각. 워터마크 대비 뒤처지면 닫는다. */
         long lastTs = Long.MIN_VALUE;
+
+        /** 지금 열려 있는 파일의 part 번호. 닫을 때 최종 이름을 만드는 데 쓴다. */
+        int partNo;
+
+        /** 닫는 순간의 벽시계. <b>푸터와 파일명이 같은 값을 써야 한다</b> (ADR-0006 결정 8). */
+        long closeEpoch;
 
         /** {@link Config#sortWithinFile()} 일 때만 채운다. 닫을 때 정렬해서 한꺼번에 쓴다. */
         List<Datapoint> buffer;
@@ -368,13 +399,29 @@ public final class PartitionedParquetWriter implements Closeable {
     }
 
     private void openFile(Slot slot) throws IOException {
-        int part = nextPart.merge(slot.dir, 1, Integer::sum) - 1;
+        slot.partNo = nextPart.merge(slot.dir, 1, Integer::sum) - 1;
+        // 열 때는 닫힌 시각을 모른다. 임시 이름으로 열고 close 후 최종 이름으로 바꾼다.
         Path path = config.root().resolve(slot.dir)
-                .resolve("part-" + writerId + "-" + part + ".parquet");
+                .resolve("part-open-" + writerId + "-" + slot.partNo + ".parquet");
         slot.writer = ParquetDatapointWriter.open(
                 path, ValueLayout.PER_KEY_TYPED, slot.kind, config.codec(),
-                config.rowGroupSize(), config.writerVersion());
+                config.rowGroupSize(), config.writerVersion(),
+                () -> footerMetadataFor(slot));
         slot.rowsInFile = 0;
+    }
+
+    /**
+     * 푸터에 넣을 값. 호출자가 준 것 위에 이 라이터만 아는 둘을 얹는다.
+     *
+     * <p>{@code close_epoch} 는 <b>파일명에 들어간 값과 반드시 같아야 한다</b> —
+     * 조회 쪽 "나중 파일이 이긴다"가 파일명으로 판정하는데 푸터가 다른 값을 말하면
+     * 두 판정이 갈린다.
+     */
+    private Map<String, String> footerMetadataFor(Slot slot) {
+        Map<String, String> meta = new LinkedHashMap<>(config.fileMetadata().metadataFor(slot.dir));
+        meta.put("ts-tiering.writer_id", writerId);
+        meta.put("ts-tiering.close_epoch", Long.toString(slot.closeEpoch));
+        return meta;
     }
 
     /**
@@ -404,9 +451,9 @@ public final class PartitionedParquetWriter implements Closeable {
                 }
                 slot.buffer = new ArrayList<>();
             }
+            // 푸터 메타데이터가 close 안에서 평가되므로 그 전에 정해져 있어야 한다.
+            slot.closeEpoch = System.currentTimeMillis();
             writer.close();
-            closedFiles.add(writer.path());
-            config.closedFileListener().onClosed(slot.dir, writer.path(), rowsInFile);
         } catch (IOException | RuntimeException e) {
             try {
                 writer.close();
@@ -415,6 +462,31 @@ public final class PartitionedParquetWriter implements Closeable {
             }
             throw e;
         }
+
+        // 핸들이 닫힌 뒤라 여기서 실패해도 fd 는 새지 않는다.
+        Path finalPath = stampCloseTime(writer.path(), slot);
+        closedFiles.add(finalPath);
+        config.closedFileListener().onClosed(slot.dir, finalPath, rowsInFile);
+    }
+
+    /**
+     * 닫힌 시각을 파일명 앞에 박는다: {@code part-<closeEpochMillis>-<writerId>-<n>.parquet}
+     * (ADR-0006 결정 8).
+     *
+     * <p>재시작 중복은 파일 단위로 깔끔하지 않다 — 재생본은 커밋 지점부터 시작하고 워터마크가
+     * 인메모리라 닫기 시점도 달라져 파일 경계가 어긋난다. 그래서 콘텐츠 해시로 멱등 PUT 하는
+     * 방법도, 옛 파일을 지우는 방법도 안 통한다. 남는 방법이 <b>조회 시점에 순서를 정하는 것</b>이고,
+     * 그러려면 순서가 이름에 있어야 한다
+     * ({@code ORDER BY filename DESC} 로 "나중에 쓴 파일이 이긴다").
+     *
+     * <p>epoch millis 는 2286년까지 13자리라 사전순 비교가 수치순과 같다.
+     * 같은 밀리초에 닫힌 두 파일은 {@code writerId} 로 갈리는데, 그건 임의지만 결정론적이다.
+     */
+    private Path stampCloseTime(Path openPath, Slot slot) throws IOException {
+        Path target = openPath.resolveSibling(
+                "part-" + slot.closeEpoch + "-" + writerId + "-" + slot.partNo + ".parquet");
+        Files.move(openPath, target, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        return target;
     }
 
     /**

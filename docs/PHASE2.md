@@ -16,7 +16,7 @@ Phase 1 의 산출물이 측정 결과표였다면, Phase 2 의 산출물은 **�
 
 | | 결정 | 근거 |
 |---|---|---|
-| 객체 키 | `tenant=/date=/key=/part-N.parquet` | [ADR-0004](adr/0004-partition-scheme.md) |
+| 객체 키 | `tenant=/date=/key=/part-<closeEpoch>-<writerId>-<n>.parquet` | [ADR-0004](adr/0004-partition-scheme.md) |
 | 값 표현 | PER_KEY_TYPED + ZSTD | [ADR-0002](adr/0002-value-layout.md) |
 | 파일 내 정렬 | `(device_id, ts)` + Parquet v2 | ADR-0004 |
 | 쿼리 엔진 | DuckDB | [ADR-0003](adr/0003-query-engine.md) |
@@ -79,13 +79,15 @@ archiver 재시작(배포·OOM·컨테이너 재기동) 때마다 이전 part �
 Kafka 오프셋은 커밋됐고 hot 은 TTL 로 지워졌는데 cold 에는 없는 상태가 만들어진다.
 
 **수정 (2026-08-15):** 파일명이 `part-<writerId>-<seq>.parquet` 이 됐다.
+(2026-08-16 에 `part-<closeEpoch>-<writerId>-<seq>.parquet` 으로 한 번 더 늘었다 — ADR-0006 결정 8.)
 `writerId` 는 인스턴스별 UUID 앞 8자라 재시작하면 다른 값이 나온다.
 `ParquetDatapointWriter` 의 `deleteIfExists` 도 제거해서, 같은 경로가 이미 있으면
 `ParquetWriter` 의 기본 모드(CREATE)가 예외를 던진다 — 조용히 지우는 대신 시끄럽게 실패한다.
 회귀 테스트: `PartitionedParquetWriterTest#secondWriterInstanceDoesNotOverwriteFirstOnesFiles`.
 
-**남은 것:** 임시 경로에 쓰고 close 성공 후 atomic move 하는 패턴.
-미완성 파일이 업로드 후보에 섞이는 문제는 아직 열려 있다 (W2 에서).
+**수정 (2026-08-16):** 임시 경로에 쓰고 close 성공 후 atomic move 하는 패턴을 붙였다.
+`inflight/` 에 쓰고 닫히면 `ready/` 로 `ATOMIC_MOVE` 한다 (`LocalSpool`, ADR-0006 결정 7).
+미완성 파일이 업로드 후보에 섞이는 경로가 닫혔다.
 
 ### 2. 디바이스가 보내는 `key` 가 검증 없이 객체 경로가 된다 ✅ 수정됨
 
@@ -204,8 +206,21 @@ LRU 대비 같은 결과에 동시 열린 파티션이 30% 적고, 무엇보다 
 최대 미커밋 100,800 오프셋 — ADR-0006 이 말한 재생 구간의 크기가 실측으로 나왔다.
 깨진 메시지 500건을 섞어도 정확히 갈린다 (기록 5,000 / 파싱 실패 500).
 
-남은 것: 1천만 건 규모, `kill -9` 경로(중복이 실제로 어느 규모인지),
-리밸런스 실측, ADR-0006 결정 8(파일명 닫힌 시각 + 푸터 오프셋 메타데이터).
+`kill -9` 도 쟀다. **유실은 어느 조건에서도 0**이고, 중복은 두 축으로 통제된다.
+
+| | 중복 | S3 객체 |
+|---|---|---|
+| 결정 8 전, 상한 2,000,000 | 367,200 (100%) | 120개 / 1.3 MiB |
+| 결정 8 전, 상한 50,000 | 0 | 135개 / 983 KiB |
+| **결정 8 후, 상한 2,000,000** | **7,200 (1.96%)** | **61개 / 0.7 MiB** |
+
+결정 8(닫힌 시각 파일명 + 푸터 오프셋 좌표)을 구현하니 설정을 바꾸지 않고 중복이 100% → 1.96%
+가 됐다. 상한을 낮춰 얻는 0% 와 달리 파일 수 대가가 없다. 남은 1.96% 는 **죽기 직전 S3 로
+이미 올라갔지만 커밋 전인 파일 하나**로, 복구가 손댈 수 없는 다른 창이다 — 조회 쪽 dedup
+(`ORDER BY filename DESC`)이 해소하는 것까지 확인했다.
+
+남은 것: 1천만 건 규모, 리밸런스 실측(두 인스턴스), 거부된 키 경로,
+dedup 을 켠 상태의 질의 비용.
 
 ### W3 — storage-cassandra (읽기 전용)
 

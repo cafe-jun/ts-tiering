@@ -126,6 +126,8 @@ public final class ArchiveMain {
         System.out.printf("파싱 실패   : %,d%n", stats.undecodable());
         System.out.printf("거부        : %,d%n", stats.rejected());
         System.out.printf("업로드 파일 : %,d%n", stats.filesUploaded());
+        System.out.printf("복구 올림   : %,d  /  복구 버림 : %,d  ← 버린 만큼 중복이 안 생겼다%n",
+                stats.recoveredForUpload(), stats.discardedOnRecovery());
         System.out.printf("최대 미커밋 : %,d 오프셋  ← 재생 구간의 크기%n", stats.maxUncommittedSpan());
         System.out.printf("소요        : %.1fs%n", seconds);
 
@@ -166,6 +168,19 @@ public final class ArchiveMain {
                      + prefix + "/**/*.parquet', hive_partitioning = 1))")) {
             rs.next();
             System.out.printf("고유 행 수: %,d  ← 중복 제거 후%n", rs.getLong(1));
+        }
+
+        // ADR-0006 결정 8 의 목적지. 파일명 앞의 닫힌 시각으로 "나중 파일이 이긴다"를 정한다.
+        // DISTINCT 와 달리 값이 다른 중복에서도 어느 쪽이 이길지가 정해진다.
+        try (var conn = DuckDb.openLocal();
+             var st = conn.createStatement();
+             var rs = st.executeQuery("SELECT count(*) FROM ("
+                     + "SELECT * FROM read_parquet('s3://" + bucket + "/" + prefix
+                     + "/**/*.parquet', hive_partitioning = 1, filename = 1) "
+                     + "QUALIFY row_number() OVER ("
+                     + "  PARTITION BY tenant_id, device_id, key, ts ORDER BY filename DESC) = 1)")) {
+            rs.next();
+            System.out.printf("dedup 후 행 수: %,d  ← 파일명 순서로 해소%n", rs.getLong(1));
         }
     }
 }

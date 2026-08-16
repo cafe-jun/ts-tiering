@@ -146,4 +146,36 @@ class OffsetLedgerTest {
 
         assertEquals(10, ledger.committableOffset(TP).orElseThrow());
     }
+
+    /**
+     * 슬롯이 담은 오프셋 구간을 닫는 순간에 읽을 수 있어야 한다 — 그 값이 푸터로 가고,
+     * 재시작 복구가 그걸로 "어차피 재생되는 파일"을 가른다 (ADR-0006 결정 8).
+     */
+    @Test
+    void offsetRangeSpansEverythingTrackedForThatOwner() {
+        var ledger = new OffsetLedger();
+        ledger.track("slot-A", TP, 50);
+        ledger.track("slot-A", TP, 10);
+        ledger.track("slot-A", TP, 90);
+        ledger.track("slot-B", TP, 70);
+
+        var range = ledger.offsetRange("slot-A").orElseThrow();
+        assertEquals(10, range.minOffset());
+        assertEquals(90, range.maxOffset());
+
+        assertTrue(ledger.offsetRange("slot-없음").isEmpty());
+    }
+
+    /** 소유권이 파일로 넘어가도 구간은 그대로 따라가야 한다. */
+    @Test
+    void offsetRangeSurvivesTransfer() {
+        var ledger = new OffsetLedger();
+        ledger.track("slot-A", TP, 10);
+        ledger.track("slot-A", TP, 90);
+        ledger.transfer("slot-A", "ready/part-0.parquet");
+
+        var range = ledger.offsetRange("ready/part-0.parquet").orElseThrow();
+        assertEquals(10, range.minOffset());
+        assertEquals(90, range.maxOffset());
+    }
 }

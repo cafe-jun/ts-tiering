@@ -16,6 +16,8 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Parquet 파일 하나에 Datapoint 를 쓴다.
@@ -75,6 +77,22 @@ public final class ParquetDatapointWriter implements Closeable {
                                               CompressionCodecName codec,
                                               int rowGroupSize,
                                               ParquetProperties.WriterVersion writerVersion) throws IOException {
+        return open(path, layout, fixedKind, codec, rowGroupSize, writerVersion, Map::of);
+    }
+
+    /**
+     * @param footerMetadata 푸터에 넣을 추가 키-값. <b>{@link #close()} 시점에 평가된다</b> —
+     *                       Kafka 오프셋 구간처럼 파일을 다 쓴 뒤에야 확정되는 값을 담기 위한 것이다
+     *                       (ADR-0006 결정 8). 재시작 복구가 이 값으로
+     *                       "이 파일은 어차피 재생된다"를 판단한다
+     */
+    public static ParquetDatapointWriter open(Path path,
+                                              ValueLayout layout,
+                                              TsValue.Kind fixedKind,
+                                              CompressionCodecName codec,
+                                              int rowGroupSize,
+                                              ParquetProperties.WriterVersion writerVersion,
+                                              Supplier<Map<String, String>> footerMetadata) throws IOException {
         if (path.getParent() != null) {
             Files.createDirectories(path.getParent());
         }
@@ -88,7 +106,7 @@ public final class ParquetDatapointWriter implements Closeable {
                 ? ValueLayout.schemaForKind(fixedKind)
                 : layout.schema();
 
-        ParquetWriter<Datapoint> writer = new Builder(new LocalOutputFile(path), schema, layout, fixedKind)
+        ParquetWriter<Datapoint> writer = new Builder(new LocalOutputFile(path), schema, layout, fixedKind, footerMetadata)
                 .withConf(new PlainParquetConfiguration())
                 .withCompressionCodec(codec)
                 // 기본 CodecFactory 는 Class.forName 으로 Hadoop 코덱을 찾는다 (ADR-0001)
@@ -129,12 +147,15 @@ public final class ParquetDatapointWriter implements Closeable {
         private final MessageType schema;
         private final ValueLayout layout;
         private final TsValue.Kind fixedKind;
+        private final Supplier<Map<String, String>> footerMetadata;
 
-        private Builder(OutputFile file, MessageType schema, ValueLayout layout, TsValue.Kind fixedKind) {
+        private Builder(OutputFile file, MessageType schema, ValueLayout layout, TsValue.Kind fixedKind,
+                        Supplier<Map<String, String>> footerMetadata) {
             super(file);
             this.schema = schema;
             this.layout = layout;
             this.fixedKind = fixedKind;
+            this.footerMetadata = footerMetadata;
         }
 
         @Override
@@ -151,7 +172,7 @@ public final class ParquetDatapointWriter implements Closeable {
 
         @Override
         protected WriteSupport<Datapoint> getWriteSupport(ParquetConfiguration conf) {
-            return new DatapointWriteSupport(schema, layout, fixedKind);
+            return new DatapointWriteSupport(schema, layout, fixedKind, footerMetadata);
         }
     }
 }

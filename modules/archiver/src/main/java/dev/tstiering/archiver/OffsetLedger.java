@@ -82,6 +82,24 @@ public final class OffsetLedger {
         complete(owner);
     }
 
+    /** 한 단위가 담은 오프셋 구간. 파일 푸터에 박아 복구가 재생 여부를 판단하게 한다. */
+    public record OffsetRange(long minOffset, long maxOffset) {
+    }
+
+    /**
+     * 단위가 지금까지 담은 오프셋 구간. 슬롯이 닫히는 순간에 불러 푸터에 넣는다
+     * (ADR-0006 결정 8).
+     *
+     * @return 그 단위에 붙은 오프셋이 하나도 없으면 비어 있다
+     */
+    public Optional<OffsetRange> offsetRange(Object owner) {
+        for (Map<Object, Pending> byOwner : pending.values()) {
+            Pending p = byOwner.get(owner);
+            if (p != null) return Optional.of(new OffsetRange(p.minOffset(), p.maxOffset()));
+        }
+        return Optional.empty();
+    }
+
     /**
      * 커밋해도 안전한 오프셋. <b>Kafka 규약대로 "다음에 읽을 위치"</b>다.
      *

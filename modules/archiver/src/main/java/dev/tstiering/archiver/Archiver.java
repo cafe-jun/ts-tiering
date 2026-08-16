@@ -17,6 +17,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -45,10 +46,24 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class Archiver implements Closeable {
 
-    /** 처리 결과. W2 종료 조건의 지표가 여기서 나온다. */
+    /**
+     * 처리 결과. W2 종료 조건의 지표가 여기서 나온다.
+     *
+     * @param recoveredForUpload 크래시 잔여물 중 <b>올린</b> 파일 수
+     * @param discardedOnRecovery 크래시 잔여물 중 <b>버린</b> 파일 수 —
+     *                            오프셋이 커밋되지 않아 어차피 재생되는 것들이다.
+     *                            이 값만큼 중복이 안 생겼다는 뜻이다 (ADR-0006 결정 8)
+     */
     public record Stats(long consumed, long written, long undecodable, long rejected,
-                        long filesUploaded, long committed, long maxUncommittedSpan) {
+                        long filesUploaded, long committed, long maxUncommittedSpan,
+                        long recoveredForUpload, long discardedOnRecovery) {
     }
+
+    /** 푸터에 박는 오프셋 좌표. 재시작 복구가 이 값으로 재생 여부를 판단한다. */
+    static final String META_TOPIC = "ts-tiering.kafka.topic";
+    static final String META_PARTITION = "ts-tiering.kafka.partition";
+    static final String META_MIN_OFFSET = "ts-tiering.kafka.min_offset";
+    static final String META_MAX_OFFSET = "ts-tiering.kafka.max_offset";
 
     private final ArchiverConfig config;
     private final KafkaConsumer<byte[], byte[]> consumer;
@@ -74,6 +89,8 @@ public final class Archiver implements Closeable {
     private long filesUploaded;
     private long committed;
     private long maxUncommittedSpan;
+    private long recoveredForUpload;
+    private long discardedOnRecovery;
 
     /** 빈 poll 이 이만큼 이어지면 더 올 것이 없다고 본다. poll 타임아웃 1초 기준 5초. */
     public static final int DEFAULT_IDLE_POLLS_BEFORE_DRAIN = 5;
@@ -107,10 +124,7 @@ public final class Archiver implements Closeable {
      * @param idlePollsBeforeDrain 이만큼 연속으로 빈 poll 이면 마무리한다
      */
     public Stats run(long maxRecords, int idlePollsBeforeDrain) throws IOException {
-        // 1. 크래시 잔여물 정리 — inflight 는 버리고 ready 는 업로드 큐로 되살린다.
-        for (Path ready : spool.recover()) {
-            uploadQueue.put(ready, null);   // 파티션을 모르므로 오프셋 추적 대상이 아니다
-        }
+        recoverReadyFiles();
 
         consumer.subscribe(List.of(config.topic()), new RebalanceHandler());
 
@@ -144,6 +158,115 @@ public final class Archiver implements Closeable {
         commitSafeOffsets();
 
         return stats();
+    }
+
+    // --- 크래시 복구 ------------------------------------------------------------
+
+    /**
+     * 크래시 잔여물 정리. {@code inflight/} 는 버리고, {@code ready/} 는 <b>푸터를 보고 가른다</b>.
+     *
+     * <p>예전에는 남은 {@code ready} 를 전부 올렸다. 유실을 막는 안전한 선택이지만
+     * <b>중복을 보장한다</b> — 그 파일들의 오프셋이 커밋되지 않았다면 재생으로 같은 데이터가
+     * 다시 들어오기 때문이다. 실제로 {@code kill -9} 측정에서 중복 100% 가 이 경로에서 나왔다.
+     *
+     * <p>푸터에 오프셋 구간이 있으면 규칙이 하나로 정해진다 (ADR-0006 결정 8).
+     *
+     * <pre>
+     * 커밋 오프셋 &gt; maxOffset  →  재생되지 않는다. 반드시 올린다
+     * 커밋 오프셋 ≤ minOffset  →  통째로 재생된다. 버린다
+     * 그 사이                  →  부분 겹침. 저수위선 규칙에서는 생기지 않는다 (아래 참고)
+     * </pre>
+     */
+    private void recoverReadyFiles() throws IOException {
+        List<Path> ready = spool.recover();
+        if (ready.isEmpty()) return;
+
+        List<Recovered> known = new ArrayList<>();
+        List<Path> unknown = new ArrayList<>();
+        for (Path file : ready) {
+            Recovered r = readOffsets(file);
+            if (r == null) unknown.add(file);
+            else known.add(r);
+        }
+
+        Map<TopicPartition, OffsetAndMetadata> committedOffsets = fetchCommitted(known);
+
+        for (Recovered r : known) {
+            OffsetAndMetadata at = committedOffsets.get(r.tp());
+
+            if (at == null || at.offset() <= r.minOffset()) {
+                // 커밋이 없거나 이 파일 앞이다 → 이 구간은 통째로 다시 읽힌다. 올리면 확정적 중복이다.
+                spool.discard(r.file());
+                discardedOnRecovery++;
+                continue;
+            }
+            if (at.offset() <= r.maxOffset()) {
+                // 커밋값은 진행 중인 단위의 minOffset 이하여야 하므로(결정 1) 여기 오면 안 된다.
+                // 그래도 왔다면 유실 쪽으로 기울지 않는다 — 올리고 시끄럽게 남긴다.
+                System.out.printf("  ⚠️ 복구: %s 가 커밋 오프셋 %d 를 걸친다 (파일 %d~%d). "
+                                + "저수위선 규칙이 깨졌다는 뜻이다. 중복을 감수하고 올린다%n",
+                        r.file().getFileName(), at.offset(), r.minOffset(), r.maxOffset());
+            }
+            uploadQueue.put(r.file(), r.tp());
+            recoveredForUpload++;
+        }
+
+        for (Path file : unknown) {
+            // 오프셋 좌표가 없으면 판단할 수 없다. 유실보다 중복이 낫다.
+            uploadQueue.put(file, null);
+            recoveredForUpload++;
+        }
+
+        System.out.printf("복구: ready %,d개 → 올림 %,d / 버림 %,d%s%n",
+                ready.size(), recoveredForUpload, discardedOnRecovery,
+                unknown.isEmpty() ? "" : "  (오프셋 좌표 없는 파일 " + unknown.size() + "개 포함)");
+    }
+
+    private record Recovered(Path file, TopicPartition tp, long minOffset, long maxOffset) {
+    }
+
+    /** 푸터에서 오프셋 좌표를 읽는다. 하나라도 없으면 {@code null} — 판단할 수 없다는 뜻이다. */
+    private Recovered readOffsets(Path file) {
+        Map<String, String> meta;
+        try {
+            meta = dev.tstiering.parquet.ParquetStats.footerMetadata(file);
+        } catch (IOException | RuntimeException e) {
+            return null;   // 푸터가 깨졌다. verifyReady 가 따로 잡는다
+        }
+        String topic = meta.get(META_TOPIC);
+        String partition = meta.get(META_PARTITION);
+        String min = meta.get(META_MIN_OFFSET);
+        String max = meta.get(META_MAX_OFFSET);
+        if (topic == null || partition == null || min == null || max == null) return null;
+
+        try {
+            return new Recovered(file, new TopicPartition(topic, Integer.parseInt(partition)),
+                    Long.parseLong(min), Long.parseLong(max));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
+     * 배정 전에 커밋 오프셋을 묻는다. 코디네이터에게 직접 묻는 것이라 구독 없이도 된다.
+     *
+     * <p>실패하면 <b>빈 맵</b>이 아니라 예외를 던져야 할 것 같지만 그렇지 않다 —
+     * 빈 맵은 "커밋 없음"으로 읽혀 전부 버리게 되고, 그건 유실이다. 실패하면 전부 올린다.
+     */
+    private Map<TopicPartition, OffsetAndMetadata> fetchCommitted(List<Recovered> known) {
+        if (known.isEmpty()) return Map.of();
+        var partitions = new java.util.HashSet<TopicPartition>();
+        known.forEach(r -> partitions.add(r.tp()));
+        try {
+            return consumer.committed(partitions);
+        } catch (RuntimeException e) {
+            System.out.println("  ⚠️ 복구: 커밋 오프셋을 못 읽었다 (" + e + "). 남은 ready 를 전부 올린다");
+            var all = new HashMap<TopicPartition, OffsetAndMetadata>();
+            // 커밋이 파일 뒤에 있다고 보면 "올린다" 분기로 간다.
+            known.forEach(r -> all.merge(r.tp(), new OffsetAndMetadata(r.maxOffset() + 1),
+                    (a, b) -> a.offset() >= b.offset() ? a : b));
+            return all;
+        }
     }
 
     // --- 레코드 하나 -----------------------------------------------------------
@@ -187,9 +310,25 @@ public final class Archiver implements Closeable {
                     .of(root, HivePartitionSpecs.tenantDate(), CompressionCodecName.ZSTD)
                     .withSortWithinFile(true)
                     .withClosePolicy(closePolicy)
-                    .withClosedFileListener((slotDir, file, rows) -> onFileClosed(key, slotDir, file));
+                    .withClosedFileListener((slotDir, file, rows) -> onFileClosed(key, slotDir, file))
+                    // 닫히는 순간 오프셋 구간을 푸터에 박는다. 재시작 복구가 이걸로 판단한다.
+                    .withFileMetadata(slotDir -> kafkaMetadata(key, slotDir));
             return new PartitionedParquetWriter(cfg);
         });
+    }
+
+    /**
+     * 파일이 담은 Kafka 좌표. <b>{@code onFileClosed} 보다 먼저</b> 불린다 —
+     * 아직 오프셋 소유권이 슬롯에 있을 때라 구간을 읽을 수 있다.
+     */
+    private Map<String, String> kafkaMetadata(TopicPartition tp, String slotDir) {
+        var range = ledger.offsetRange(slotKey(tp, slotDir));
+        if (range.isEmpty()) return Map.of();
+        return Map.of(
+                META_TOPIC, tp.topic(),
+                META_PARTITION, Integer.toString(tp.partition()),
+                META_MIN_OFFSET, Long.toString(range.get().minOffset()),
+                META_MAX_OFFSET, Long.toString(range.get().maxOffset()));
     }
 
     /** 슬롯이 닫혔다. 오프셋 소유권을 파일로 넘기고 업로드 큐에 넣는다. */
@@ -295,7 +434,8 @@ public final class Archiver implements Closeable {
 
     public Stats stats() {
         return new Stats(consumed, written, undecodable, rejected,
-                filesUploaded, committed, maxUncommittedSpan);
+                filesUploaded, committed, maxUncommittedSpan,
+                recoveredForUpload, discardedOnRecovery);
     }
 
     @Override
